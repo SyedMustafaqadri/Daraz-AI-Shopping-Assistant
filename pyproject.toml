@@ -1,0 +1,83 @@
+[project]
+name = "daraz-ai-shopping-assistant"
+version = "0.1.0"
+description = "AI-powered shopping assistant backend for Daraz.pk"
+readme = "README.md"
+authors = [
+    { name = "SyedMustafaqadri", email = "linkmustafa75@gmail.com" }
+]
+requires-python = ">=3.14"
+dependencies = [
+    "fastapi>=0.141.1",
+    "firecrawl-py>=4.43.0",
+    "httpx>=0.28.1",
+    "langchain-core>=1.6.3",
+    "langchain-google-genai>=4.4.0",
+    "langgraph>=1.2.11",
+    "playwright>=1.62.0",
+    "pydantic>=2.13.5",
+    "pydantic-settings>=2.15.0",
+    "python-dotenv>=1.2.3",
+    "uvicorn[standard]>=0.53.0",
+]
+
+[project.scripts]
+daraz-ai-shopping-assistant = "daraz_ai_shopping_assistant:main"
+
+[dependency-groups]
+dev = [
+    "mypy>=2.3.1",
+    "pre-commit>=4.6.2",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "pytest-cov>=7.1.0",
+    "ruff>=0.16.7",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/daraz_ai_shopping_assistant"]
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+pythonpath = ["src"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = [
+    "-ra",
+    "--strict-markers",
+    "--strict-config",
+]
+markers = [
+    "integration: tests that hit real upstream services (deselect with '-m \"not integration\"')",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+src = ["src", "tests", "scripts"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "C4", "SIM", "RUF"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests deliberately use naive datetimes and other lint-unfriendly patterns.
+"tests/**/*.py" = ["DTZ001", "S101"]
+
+[tool.mypy]
+python_version = "3.14"
+strict = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+warn_unreachable = true
+mypy_path = "src"
+files = ["src", "tests", "scripts"]
+
+[[tool.mypy.overrides]]
+module = ["firecrawl.*"]
+ignore_missing_imports = true
