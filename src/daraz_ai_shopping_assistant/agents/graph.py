@@ -137,8 +137,9 @@ def _default_llm() -> BaseChatModel:
 def _content_to_str(message: BaseMessage) -> str:
     """Return a message's text content as a plain string.
 
-    LangChain's ``BaseMessage.content`` may be a string or a list of
-    content blocks depending on the provider. This normalises both.
+    LangChain's ``BaseMessage.content`` may be a string, a list of
+    content blocks, or a provider-specific object. This normalises the
+    common shapes used by the SDK.
 
     Args:
         message: The message whose content to extract.
@@ -146,7 +147,7 @@ def _content_to_str(message: BaseMessage) -> str:
     Returns:
         The text content, or an empty string when no text is present.
     """
-    content = message.content
+    content: Any = message.content
     if isinstance(content, str):
         return content
     if isinstance(content, list):
@@ -157,7 +158,10 @@ def _content_to_str(message: BaseMessage) -> str:
             elif isinstance(block, dict) and block.get("type") == "text":
                 parts.append(str(block.get("text", "")))
         return "".join(parts)
-    return str(content)
+    if isinstance(content, dict):
+        text = content.get("text")
+        return str(text) if text is not None else ""
+    return ""
 
 def _last_human_message(state: AgentState) -> str:
     """Return the text of the most recent human message in the state.

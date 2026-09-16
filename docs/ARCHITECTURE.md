@@ -2,262 +2,222 @@
 
 The backend is a strict, dependency-injected pipeline. Each layer knows only
 the layer directly below it, and the Pydantic model is the single trusted
-contract that everything is validated against before it reaches a client.
+contract before a response reaches a client.
 
 ---
 
 ## 1. Layering
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│  API Route (api/)                                           │
-│  - URL paths, query params, response serialisation           │
-│  - NO business logic. Delegates to services.                 │
-└───────────────────────────┬─────────────────────────────────┘
-                            │
-┌───────────────────────────▼─────────────────────────────────┐
-│  Service (services/)                                        │
-│  - Orchestrates: build URL → call scraper → call parser →   │
-│    validate → assemble envelope.                            │
-│  - Owns timestamps, filter/pagination objects, decision on  │
-│    dropped products.                                        │
-│  - Does NOT know Firecrawl exists.                          │
-└───────────────────────────┬─────────────────────────────────┘
-        ┌───────────────────┼────────────────────┐
-        │                   │                    │
-┌───────▼──────┐   ┌────────▼────────┐   ┌──────▼──────────┐
-│ Scraper      │   │ Parser          │   │ Pydantic Models │
-│ (scrapers/)  │   │ (parsers/)      │   │ (models/)       │
-│ DarazScraper │   │ pure functions  │   │ domain schema   │
-│ interface +  │   │ Markdown → dict │   │ the contract    │
-│ Firecrawl    │   │ no I/O          │   │                 │
-│ impl         │   │                 │   │                 │
-└───────┬──────┘   └─────────────────┘   └─────────────────┘
-        │
-┌───────▼─────────────────────────────────────────────────────┐
-│  FirecrawlAdapter (scrapers/firecrawl.py)                   │
-│  - ONLY module permitted to import `firecrawl`.             │
-│  - Two modes: scrape (Markdown) and scrape_json (LLM).      │
-│  - Retries transient failures, maps to typed exceptions.    │
-└──────────────────────────────────────────────────────────────┘
+API route (api/)
+  → service (services/)
+  → scraper (scrapers/)
+  → Firecrawl adapter (scrapers/firecrawl.py)
+  → Daraz.pk / Firecrawl
+      ↓
+  parser (parsers/) when the source is Markdown search HTML
+      ↓
+  Pydantic model validation (models/)
+      ↓
+  JSON response over FastAPI
 ```
 
 ### Hard layering rules
 
-- **Routes** (`api/`) contain no business logic. They call services and return
-  response schemas.
-- **Services** (`services/`) orchestrate. They never import `firecrawl`.
-- **Scrapers** own the interface. `FirecrawlDarazScraper` calls
-  `FirecrawlAdapter`. Only `scrapers/firecrawl.py` imports `firecrawl`.
-- **Parsers** (`parsers/`) are pure: Markdown in, dict out. No I/O, no
-  network, no globals, no Pydantic validation (that belongs to the service).
-- **Models** (`models/`) hold internal Pydantic domain models.
-- **Schemas** (`schemas/`) hold FastAPI request/response DTOs.
-- **Core** (`core/`) holds settings, exceptions, and logging.
-
-### Forbidden patterns
-
-- `import firecrawl` anywhere outside `scrapers/firecrawl.py`.
-- `httpx.get(...)` inside a parser.
-- Returning raw dicts from API routes (must be Pydantic models).
-- Business logic inside route handlers.
-- Global mutable state.
-- `print()` for debugging (use `logging`).
+- Routes own HTTP validation and response serialization; they do not contain business logic.
+- Services coordinate fetch, parse, validate, and normalise flows.
+- `FirecrawlDarazScraper` owns the Daraz-specific interface; `FirecrawlAdapter` is the only module that imports `firecrawl`.
+- Parser functions are pure: Markdown in, dict out.
+- Pydantic models are the contract: raw data is never exposed directly to clients.
+- The chat agent sits above the backend and calls the validated services, never bypassing them.
 
 ---
 
-## 2. Data Flow
+## 2. Data flow
 
-### 2.1 Search (deterministic path)
+### 2.1 Search path
 
 ```
 GET /api/v1/products/search?q=...
    │
    ▼
-search_products_endpoint (api/search.py)
-   │  validates query params via FastAPI Query
-   ▼
-SearchService.search (services/search_service.py)
-   │  1. normalise + validate input (empty query, price range)
-   │  2. fetch raw Markdown
-   ▼
-FirecrawlDarazScraper.fetch_search_markdown (scrapers/daraz.py)
-   │  builds the Daraz URL, delegates to the adapter
-   ▼
-FirecrawlAdapter.scrape (scrapers/firecrawl.py)
-   │  Firecrawl Markdown mode, with retry + exception mapping
-   ▼
-Daraz search-results page (Markdown string)
+search_products_endpoint
    │
    ▼
-parse_search_results (parsers/search_parser.py)
-   │  pure regex parsing → untrusted dict
+SearchService.search
+   │  normalise query + validate filters
    ▼
-Product.model_validate per product (services/search_service.py)
-   │  invalid entries are dropped + logged
-   ▼
-SearchResult envelope (models/search.py)
+FirecrawlDarazScraper.fetch_search_markdown
    │
    ▼
-JSON response (schemas/search.SearchResponse == SearchResult)
+FirecrawlAdapter.scrape (Markdown mode)
+   │
+   ▼
+parse_search_results (pure parser)
+   │
+   ▼
+Product.model_validate for each item
+   │
+   ▼
+SearchResult + pagination envelope
 ```
 
-No LLM touches a search result. The entire path is deterministic and testable
-against a frozen Markdown fixture.
+This path is deterministic and fully testable with frozen Markdown fixtures.
 
-### 2.2 Product detail (structured-extraction path)
+### 2.2 Product detail path
 
 ```
 GET /api/v1/products/{product_id}
    │
    ▼
-ProductService.get_product (Phase 6 — planned)
+ProductService.get_product
    │
    ▼
 FirecrawlDarazScraper.fetch_product_payload
-   │  builds the Daraz product URL,
-   │  passes ProductDetails.model_json_schema() + a short prompt
+   │  uses ProductDetails.model_json_schema() + prompt
    ▼
 FirecrawlAdapter.scrape_json
-   │  LLM reads the page and returns a dict matching the schema
-   ▼
-dict (untrusted)
    │
    ▼
-ProductDetails.model_validate   ← the model is the contract
-   │  on failure → log PRODUCT_VALIDATION_FAILED, raise ParseError(source="product")
+ProductDetails.model_validate(payload)
+   │
    ▼
-ProductDetails response
+validated ProductDetails response
 ```
 
-### 2.3 Recommendations
+The product-detail flow uses Firecrawl structured extraction rather than regex parsing.
 
-Recommendations are a nested field of the product-detail structured
-extraction — the `ProductDetails` schema includes a `recommendations: array`.
-`GET /api/v1/products/{product_id}/recommendations` (Phase 7 — planned) reads
-that array. No second Firecrawl call is made. When Daraz shows no
-recommendation carousel, the array is empty — it is never fabricated.
+### 2.3 Recommendations path
+
+```
+GET /api/v1/products/{product_id}/recommendations
+   │
+   ▼
+ProductService.get_recommendations
+   │
+   ▼
+load the same product payload already fetched by get_product
+   │
+   ▼
+return Recommendation[] (possibly empty)
+```
+
+No second Firecrawl call is made. Recommendations are sourced from the product payload itself.
 
 ---
 
-## 3. Extraction Strategy by Page Type (ADR-001)
+## 3. Extraction strategy by page type (ADR-001)
 
-Two distinct pipelines exist, chosen by **page type**, not by convenience:
-
-| Page type | Firecrawl call | Extraction | Validated by |
+| Page type | Firecrawl mode | Extraction method | Validation |
 |---|---|---|---|
-| Search results (`/catalog/?q=...`) | `scrape(url)` → Markdown | Deterministic parser (regex) | `Product.model_validate` |
-| Product detail (`/products/...`) | `scrape_json(url, schema=...)` → dict | LLM structured extraction | `ProductDetails.model_validate` |
-| Recommendations (nested) | Same as product detail | Same, nested schema | `Recommendation.model_validate` |
+| Search results | Markdown scrape | deterministic parser | `Product.model_validate` |
+| Product detail | JSON schema extraction | structured extraction | `ProductDetails.model_validate` |
+| Recommendation carousel | same as product detail | nested structured extraction | `Recommendation.model_validate` |
 
-**Rules (enforced):**
-
-- Never call `scrape_json` on a search-result page.
-- Never call `scrape` (Markdown) on a product detail page and feed it to a
-  regex parser.
-- Never skip Pydantic validation on structured-extraction output.
-
-Full rationale and consequences: [ARCHITECTURE-DECISIONS.md](ARCHITECTURE-DECISIONS.md) §ADR-001.
+This keeps the search layer deterministic while allowing the irregular product-detail page to be handled by a schema-driven extraction model.
 
 ---
 
-## 4. Design Principles
+## 4. Agent layer
 
-### 4.1 Separation of Responsibilities
+The chat endpoint is implemented in the `agents/` package and runs over the same
+validated backend services as the REST routes.
 
 ```
-AI reasoning  !=  scraping  !=  data normalisation  !=  API layer
+POST /api/v1/chat
+   │
+   ▼
+ChatService.chat
+   │
+   ▼
+LangGraph graph (parse_intent → tool → respond)
+   │
+   ▼
+search_products / get_product / get_recommendations tools
+   │
+   ▼
+validated response + natural-language reply
 ```
 
-The LLM (when present) only handles semantic interpretation and tool calling.
-Firecrawl handles content retrieval. Application code handles deterministic
-parsing, validation, normalisation, and API responses.
-
-### 4.2 Numeric Fields Must Be Numeric
-
-Presentation formatting is stripped at the parser boundary. `price` is a
-`float`, `discount_percentage` is an `int | None`, `coins_save` and
-`sold_count` are integers. Missing data is `None` — never invented, never
-defaulted to `0` (except genuinely-empty collections like
-`recommendations: []`).
-
-### 4.3 The Model Is the Contract
-
-For structured extraction, the JSON Schema passed to Firecrawl is derived
-from `ProductDetails.model_json_schema()`. The `extra="forbid"` config adds
-`additionalProperties: false`, so the LLM cannot invent undeclared fields.
-The schema is a *suggestion*; Pydantic validation is the *enforcement*.
-
-### 4.4 Swappable Transport
-
-Services depend on the `DarazScraper` interface, never on a concrete
-implementation. A future Playwright-based scraper would subclass the same
-interface and be drop-in replaceable.
+The LLM does not invent product facts. It classifies intent and writes a plain-language summary using values already returned by the backend services.
 
 ---
 
-## 5. Folder Layout
+## 5. Folder layout
 
-The package lives at `src/daraz_ai_shopping_assistant/` (a `src/` layout).
-There is **no** `app/` folder. Tests sit at the repository root, outside
-`src/`.
+The project uses a src layout:
 
 ```
 src/daraz_ai_shopping_assistant/
-├── __init__.py            # __version__
-├── main.py                # FastAPI app factory + module-level `app`
-│
+├── __init__.py
+├── main.py
 ├── api/
-│   ├── __init__.py        # api_router mounted under /api/v1
-│   ├── deps.py            # FastAPI dependency providers
+│   ├── __init__.py
+│   ├── chat.py
+│   ├── deps.py
 │   ├── exception_handlers.py
-│   └── search.py          # GET /products/search
-│
-├── models/
+│   ├── products.py
+│   └── search.py
+├── agents/
 │   ├── __init__.py
-│   ├── product.py         # Product, ProductDetails, Seller, Shipping, ...
-│   ├── recommendation.py  # Recommendation
-│   └── search.py          # SearchFilters, Pagination, SearchResult
-│
-├── schemas/
-│   ├── __init__.py
-│   └── search.py          # SearchResponse alias
-│
-├── services/
-│   ├── __init__.py
-│   └── search_service.py  # SearchService + search_products
-│
-├── scrapers/
-│   ├── __init__.py
-│   ├── base.py            # DarazScraper (ABC)
-│   ├── daraz.py           # FirecrawlDarazScraper + URL builders
-│   └── firecrawl.py       # FirecrawlAdapter (only firecrawl import)
-│
-├── parsers/
-│   ├── __init__.py
-│   └── search_parser.py   # parse_search_results (pure)
-│
+│   ├── graph.py
+│   ├── state.py
+│   └── tools.py
 ├── core/
 │   ├── __init__.py
-│   ├── config.py          # Settings (pydantic-settings)
-│   ├── exceptions.py      # DarazScraperError hierarchy
-│   └── logging.py         # configure_logging, get_logger
-│
-└── utils/
-    ├── __init__.py
-    └── datetime.py        # PKT timezone + pkt_now()
+│   ├── config.py
+│   ├── exceptions.py
+│   └── logging.py
+├── models/
+│   ├── __init__.py
+│   ├── product.py
+│   ├── recommendation.py
+│   └── search.py
+├── parsers/
+│   ├── __init__.py
+│   └── search_parser.py
+├── schemas/
+│   ├── __init__.py
+│   ├── chat.py
+│   ├── product.py
+│   └── search.py
+├── scrapers/
+│   ├── __init__.py
+│   ├── base.py
+│   ├── daraz.py
+│   └── firecrawl.py
+├── services/
+│   ├── __init__.py
+│   ├── chat_service.py
+│   ├── product_service.py
+│   └── search_service.py
+├── utils/
+│   ├── __init__.py
+│   └── datetime.py
+└── __init__.py
 ```
 
-### Planned (not yet implemented)
+This is the active implementation. There is no root-level app/ package and no placeholder-only product-service layer.
 
-The `Specification.md` target structure anticipates these modules, which do
-not exist yet:
+---
 
-- `api/products.py`, `api/chat.py` (chat is a Phase 8 placeholder)
-- `services/product_service.py`, `services/recommendation_service.py`
-- `parsers/product_parser.py`, `parsers/recommendation_parser.py`
-  (validators for structured-extraction payloads)
-- `agents/` package — empty until Phase 8 (LangGraph) is activated
+## 6. Design principles
+
+### 6.1 Numeric fields stay numeric
+
+The project normalises values at the model boundary. `price` is a `float`, `discount_percentage` is `int | None`, and missing values stay `None` unless a collection such as `recommendations` is legitimately empty.
+
+### 6.2 The model is the contract
+
+The app validates all product and search payloads with Pydantic before returning them to clients. This is especially important for Firecrawl structured extraction, where the response is untrusted until the model validates it.
+
+### 6.3 The agent is bounded
+
+The LangGraph layer is allowed to classify intent and summarise tool results. It is not allowed to bypass the product services or fabricate raw product facts.
+
+### 6.4 No direct Firecrawl access outside the adapter
+
+Only `src/daraz_ai_shopping_assistant/scrapers/firecrawl.py` imports the Firecrawl SDK. Services and routes depend on the scraper interface instead of the provider SDK itself.
 
 ---
 

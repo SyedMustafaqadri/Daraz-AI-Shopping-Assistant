@@ -1,15 +1,16 @@
 # API Reference
 
-All endpoints are versioned under the prefix set by
-`settings.api_v1_prefix` (default `/api/v1`). Responses are JSON. In
-development (`APP_ENV=dev`), interactive OpenAPI docs are served at
-`/docs`, `/redoc`, and `/openapi.json`.
+All endpoints are versioned under the prefix configured by
+`settings.api_v1_prefix` (default `/api/v1`). Responses are JSON.
+In development (`APP_ENV=dev`), OpenAPI docs are served at `/docs`,
+`/redoc`, and `/openapi.json`.
 
 ---
 
-## Meta Endpoints
+## Meta endpoints
 
 ### `GET /`
+
 Tiny landing payload so hitting the host root is not a 404.
 
 ```json
@@ -17,6 +18,7 @@ Tiny landing payload so hitting the host root is not a 404.
 ```
 
 ### `GET /health`
+
 Liveness probe.
 
 ```json
@@ -25,7 +27,7 @@ Liveness probe.
 
 ---
 
-## Product Endpoints
+## Product endpoints
 
 ### `GET /api/v1/products/search`
 
@@ -33,22 +35,20 @@ Search Daraz.pk for products matching a free-text query, optionally bounded
 by price. Returns one page of validated products plus Daraz-reported
 pagination.
 
-**Query parameters**
+Query parameters:
 
-| Param | Type | Required | Constraints | Notes |
-|---|---|---|---|---|
-| `q` | `str` | yes | `min_length=1`, `max_length=200` | Free-text query, e.g. `gaming mouse` |
-| `min_price` | `float` | no | `ge=0` | Lower bound in PKR |
-| `max_price` | `float` | no | `ge=0` | Upper bound in PKR |
-| `page` | `int` | no | `ge=1`, `le=200` | 1-indexed; defaults to 1 |
+- `q` (required, string, min 1, max 200)
+- `min_price` (optional, float, `>= 0`)
+- `max_price` (optional, float, `>= 0`)
+- `page` (optional, int, `>= 1`, `<= 200`)
 
-**Example**
+Example:
 
-```
+```http
 GET /api/v1/products/search?q=gaming%20mouse&max_price=800&page=1
 ```
 
-**200 response body**
+Successful response:
 
 ```json
 {
@@ -60,14 +60,14 @@ GET /api/v1/products/search?q=gaming%20mouse&max_price=800&page=1
   "products": [
     {
       "id": "i1959941878",
-      "title": "RGB Gaming Mouse...",
+      "title": "RGB Gaming Mouse",
       "url": "https://www.daraz.pk/products/7-i1959941878.html",
       "image": "https://img.drz.lazcdn.com/...",
       "price": 579.0,
       "currency": "PKR",
       "original_price": null,
       "discount_percentage": 27,
-      "coins_save": 29,
+      "coins_save": 29.0,
       "sold_count": 184,
       "rating": null,
       "rating_count": 40,
@@ -78,40 +78,83 @@ GET /api/v1/products/search?q=gaming%20mouse&max_price=800&page=1
 }
 ```
 
-**FastAPI validation errors (422)** are returned for malformed input
-(missing `q`, empty `q`, negative price, `page < 1`). These are produced by
-FastAPI's own `Query` validators, before the service runs.
-
-**Application errors** are mapped from the service/scraper exceptions; see
-[ERRORS-AND-LOGGING.md](ERRORS-AND-LOGGING.md) for the full table.
+FastAPI validation errors (`422`) are returned for malformed input before the
+service is called. Application exceptions are mapped to HTTP status codes as
+described in docs/ERRORS-AND-LOGGING.md.
 
 ---
 
-### `GET /api/v1/products/{product_id}`  *(planned — Phase 6)*
+### `GET /api/v1/products/{product_id}`
 
-Return full product details via Firecrawl structured extraction with the
-`ProductDetails` schema. Not yet implemented.
+Fetch a single Daraz product by its Daraz ID. This path uses the product-detail
+structured extraction flow and validates the payload through the
+`ProductDetails` model before returning it.
 
-### `GET /api/v1/products/{product_id}/recommendations`  *(planned — Phase 7)*
+Path parameter:
 
-Return Daraz's own recommendations read from the product-detail payload. No
-second Firecrawl call. Not yet implemented.
+- `product_id` must match `^i\d+$` and look like `i1959941878`
+
+Example:
+
+```http
+GET /api/v1/products/i1959941878
+```
+
+The response is a validated `ProductDetails` object, with nested seller,
+shipping, variants, reviews, and recommendations data when Daraz provides it.
 
 ---
 
-## `POST /api/v1/chat`  *(planned — Phase 8)*
+### `GET /api/v1/products/{product_id}/recommendations`
 
-The future natural-language endpoint. Not implemented until the deterministic
-backend is proven. When built, LangGraph tools will call the **services**,
-never the scrapers or Firecrawl directly.
+Return the recommendation list from the same product payload. This does not
+trigger a second Firecrawl fetch. If the page has no recommendation carousel,
+the list is empty.
+
+Example:
+
+```http
+GET /api/v1/products/i1959941878/recommendations
+```
+
+Returns a JSON array of `Recommendation` objects.
 
 ---
 
-## Response Conventions
+## Chat endpoint
 
-- Every product in a response is a fully-validated Pydantic model; no raw
-  dicts.
-- Missing data is `null`, never an invented value.
-- Timestamps are timezone-aware (PKT, UTC+05:00).
-- Error responses contain only `{"detail": "..."}` — no stack traces, no
-  internal context.
+### `POST /api/v1/chat`
+
+Send a user message and receive a reply plus optional structured tool data.
+The chat layer uses a LangGraph agent to route intent and then calls backend
+services for search or product lookups.
+
+Request:
+
+```json
+{ "message": "Find me a gaming mouse under Rs. 5000" }
+```
+
+Response:
+
+```json
+{
+  "reply": "I found a few gaming mice under Rs. 5000.",
+  "intent": "search",
+  "data": { "search_query": "gaming mouse", "products": [...] },
+  "error": null
+}
+```
+
+The agent never invents product data; it reuses the validated results from the
+same product and search services that back the REST API.
+
+---
+
+## Response conventions
+
+- every product object is a validated Pydantic model
+- missing data stays `null` rather than being invented
+- timestamps are timezone-aware PKT timestamps
+- error responses are `{"detail": "..."}` with no internal stack traces
+- FastAPI `422` handles malformed query/path input before application logic runs

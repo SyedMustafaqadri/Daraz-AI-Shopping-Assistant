@@ -1,19 +1,18 @@
 # Errors and Logging
 
-This document covers the two cross-cutting concerns that every layer must
-respect: the exception hierarchy (`core/exceptions.py`) and the structured
-logging conventions (`core/logging.py`).
+This document covers the exception hierarchy and the structured logging
+conventions used by the backend.
 
 ---
 
-## 1. Exception Hierarchy
+## 1. Exception hierarchy
 
 All application-specific exceptions derive from `DarazScraperError`. Each
-subclass carries an `http_status` class attribute so API-level handlers map
-failures to HTTP codes **without inspecting exception messages**.
+subclass sets `http_status` so the API layer can map failures without parsing
+messages or string-matching error text.
 
-```
-DarazScraperError (base, http_status=500)
+```text
+DarazScraperError (http_status=500)
 ├── InvalidRequestError        (400)
 ├── ProductNotFoundError       (404)
 ├── ScraperError               (502)
@@ -22,126 +21,43 @@ DarazScraperError (base, http_status=500)
 └── ParseError                 (502)
 ```
 
-### Base: `DarazScraperError`
+Subclasses are raised at the layer where the issue occurs:
 
-```python
-class DarazScraperError(Exception):
-    http_status: int = 500
+- `InvalidRequestError`: invalid query/input values or malformed product ids
+- `ProductNotFoundError`: requested product could not be found
+- `ScraperError`: Firecrawl or Daraz returned an upstream failure
+- `ScraperTimeoutError`: upstream request timed out
+- `UpstreamRateLimitError`: upstream rate limit was hit
+- `ParseError`: structured data failed Pydantic validation
 
-    def __init__(self, message: str, *, context: dict[str, object] | None = None) -> None:
-        ...
-```
-
-- `message`: human-readable description.
-- `context`: optional structured context (`query`, `url`, `product_id`, ...).
-- `__str__` appends context as `key=value` pairs when present.
-
-### Subclasses
-
-| Exception | `http_status` | When raised | Extra attributes |
-|---|---|---|---|
-| `InvalidRequestError` | 400 | Caller supplied invalid parameters (empty query, contradictory filters) | — |
-| `ProductNotFoundError` | 404 | Requested product cannot be found | — |
-| `ScraperError` | 502 | Scraper failed to retrieve/return content (upstream) | `url`, `upstream_status` |
-| `ScraperTimeoutError` | 504 | Upstream did not respond within the timeout | inherits `url`, `upstream_status` |
-| `UpstreamRateLimitError` | 429 | Firecrawl or Daraz rate-limited the request | inherits `url`, `upstream_status` |
-| `ParseError` | 502 | Scraped content could not be parsed into structured data | `source` (e.g. `"product"`) |
-
-### Where each is raised
-
-- `ScraperError` / `ScraperTimeoutError` / `UpstreamRateLimitError` — raised
-  by `FirecrawlAdapter` (via `_map_exception`) after all retries are
-  exhausted.
-- `InvalidRequestError` — raised by `SearchService.search` when the query is
-  empty/whitespace, or when `min_price > max_price`.
-- `ParseError` — raised when a structured-extraction payload fails Pydantic
-  validation (product detail path). The raw LLM payload is logged
-  server-side and **never** returned to the client.
+These exceptions are centralised in `src/daraz_ai_shopping_assistant/core/exceptions.py`.
 
 ---
 
-## 2. HTTP Mapping
+## 2. HTTP mapping
 
-The API layer registers two handlers (see `api/exception_handlers.py`):
+The API layer registers exception handlers in `api/exception_handlers.py`.
 
-| Situation | HTTP | Body |
+| Situation | HTTP | Response |
 |---|---|---|
-| Invalid request params | 400 | `{"detail": "..."}` |
-| Product not found | 404 | `{"detail": "..."}` |
-| Rate limited (Firecrawl/Daraz) | 429 | `{"detail": "..."}` |
-| Upstream scraping failure | 502 | `{"detail": "..."}` |
-| Upstream timeout | 504 | `{"detail": "..."}` |
-| Parse failure | 502 | `{"detail": "..."}` |
-| Anything unhandled | 500 | `{"detail": "Internal server error."}` |
-| Malformed input (FastAPI `Query`/`Path` validation) | 422 | FastAPI's standard validation error |
+| invalid request params | 400 | `{"detail": "..."}` |
+| product missing | 404 | `{"detail": "..."}` |
+| rate limited | 429 | `{"detail": "..."}` |
+| upstream scraping or parse failure | 502 | `{"detail": "..."}` |
+| upstream timeout | 504 | `{"detail": "..."}` |
+| unhandled exception | 500 | `{"detail": "Internal server error."}` |
+| FastAPI parameter validation | 422 | FastAPI validation error |
 
-**Rules:**
-
-- Never leak stack traces to consumers. FastAPI handlers return
-  `{"detail": "..."}` only.
-- The full exception context (url, upstream_status, query, index, ...) is
-  logged server-side but is **not** in the response body.
-- FastAPI's own 422 validation errors (bad query params) are separate from
-  application 400 errors and are handled by FastAPI, not by
-  `daraz_scraper_error_handler`.
+The API never leaks stack traces or internal context in the response body.
 
 ---
 
-## 3. Exception Handlers (`api/exception_handlers.py`)
+## 3. Logging conventions
 
-`register_exception_handlers(app)` is called from `create_app()` **before**
-any route is registered, so handlers are in place for the first request.
+Logging is configured in `src/daraz_ai_shopping_assistant/core/logging.py`.
+The project uses a structured logging pattern via `extra={"ctx": {...}}`.
 
-### `daraz_scraper_error_handler`
-
-- Registered against `DarazScraperError`.
-- Because Starlette's `add_exception_handler` is typed to accept a handler
-  that takes the base `Exception`, the handler is declared with `exc:
-  Exception` and narrows at runtime with `isinstance(exc,
-  DarazScraperError)`. Non-matching exceptions are re-raised so the catch-all
-  takes over.
-- Logs `API_ERROR` with path, method, status, message, and context.
-- Returns a `JSONResponse` with `exc.http_status` and `{"detail":
-  exc.message}`.
-
-### `unhandled_exception_handler`
-
-- Registered against `Exception` (catch-all).
-- Logs the full traceback via `logger.exception("API_UNHANDLED_EXCEPTION", ...)`.
-- Returns a generic `500` with `{"detail": "Internal server error."}` — no
-  internal details leak.
-
-**Order matters:** the specific handler is registered before the catch-all so
-Starlette dispatches to the most specific match first.
-
----
-
-## 4. Logging
-
-### 4.1 Setup
-
-`configure_logging(level=None, fmt=None)` in `core/logging.py` sets up the
-root logger. It is **idempotent** — calling it more than once replaces the
-existing handler set rather than stacking.
-
-- `fmt="console"` (default, dev): human-readable, with a `ctx:` line for
-  structured context.
-- `fmt="json"` (production): single-line JSON objects.
-
-`get_logger(name)` returns a module-level logger. Always call it at import
-time with `__name__`:
-
-```python
-from daraz_ai_shopping_assistant.core.logging import get_logger
-logger = get_logger(__name__)
-```
-
-Unless in `DEBUG` mode, noisy third-party loggers (`httpx`, `httpcore`,
-`urllib3`, `firecrawl`) are silenced to `WARNING`.
-
-### 4.2 Structured Context
-
-Attach structured context via `extra={"ctx": {...}}`:
+Examples:
 
 ```python
 logger.info(
@@ -150,41 +66,40 @@ logger.info(
 )
 ```
 
-The formatters render `record.ctx` (a mapping) into the output — console as a
-`ctx:` line, JSON as a `ctx` object.
+The formatters render `ctx` into readable console output or JSON output.
 
-### 4.3 Event-Name Convention
+### Core events used in the codebase
 
-Significant lifecycle events use uppercase token prefixes (Spec §30).
-Include structured context: `query`, `page`, `count`, `duration_ms`,
-`error_type`.
-
-**Emit these exact event names:**
-
-| Event | Emitted by | Level |
+| Event | Emitted by | Notes |
 |---|---|---|
-| `APP_STARTED` / `APP_STOPPED` | `main.py` lifespan | INFO |
-| `SEARCH_STARTED` | `SearchService.search` | INFO |
-| `PRODUCTS_EXTRACTED` | `SearchService.search` | INFO |
-| `PRODUCT_VALIDATION_FAILED` | `SearchService._validate_products` | WARNING |
-| `SEARCH_COMPLETED` | `SearchService.search` | INFO |
-| `SEARCH_EMPTY` | `SearchService.search` (no products) | WARNING |
-| `DARAZ_SEARCH_FETCH` | `FirecrawlDarazScraper.fetch_search_markdown` | INFO |
-| `DARAZ_PRODUCT_FETCH` | `FirecrawlDarazScraper.fetch_product_payload` | INFO |
-| `FIRECRAWL_REQUEST` | `FirecrawlAdapter.scrape` / `scrape_json` | INFO |
-| `FIRECRAWL_RESPONSE` | `FirecrawlAdapter.scrape` / `scrape_json` | INFO |
-| `FIRECRAWL_RETRY` | `FirecrawlAdapter` on a retryable failure | WARNING |
-| `API_ERROR` | `daraz_scraper_error_handler` | WARNING |
-| `API_UNHANDLED_EXCEPTION` | `unhandled_exception_handler` | ERROR |
+| `APP_STARTED` / `APP_STOPPED` | app lifecycle | startup/shutdown |
+| `SEARCH_STARTED` | `SearchService.search` | query + page |
+| `PRODUCTS_EXTRACTED` | `SearchService.search` | count |
+| `PRODUCT_VALIDATION_FAILED` | search validation | invalid item dropped |
+| `SEARCH_COMPLETED` | `SearchService.search` | success summary |
+| `SEARCH_EMPTY` | search result handling | empty page |
+| `PRODUCT_FETCH_STARTED` | `ProductService.get_product` | product id |
+| `PRODUCT_FETCH_COMPLETED` | `ProductService.get_product` | duration + recommendation count |
+| `PRODUCT_VALIDATION_FAILED` | product validation | payload failed Pydantic validation |
+| `RECOMMENDATIONS_EXTRACTED` | `ProductService.get_recommendations` | recommendation count |
+| `FIRECRAWL_REQUEST` | `FirecrawlAdapter` | includes `mode` |
+| `FIRECRAWL_RESPONSE` | `FirecrawlAdapter` | includes `mode` and response shape |
+| `FIRECRAWL_RETRY` | adapter retry | transient failure |
+| `API_ERROR` | exception handler | request-scoped error |
+| `API_UNHANDLED_EXCEPTION` | catch-all handler | full stack trace logged |
+| `CHAT_STARTED` / `CHAT_COMPLETED` | chat service | agent timing |
+| `AGENT_INTENT_PARSED` | graph | routing result |
+| `AGENT_INTENT_PARSE_FAILED` | graph | fallback to small talk |
 
-Future (Phase 6/7) events from Spec §30: `PRODUCT_FETCH_STARTED`,
-`PRODUCT_FETCH_COMPLETED`, `RECOMMENDATIONS_EXTRACTED`.
+Sensitive values such as API keys, full HTML, and user-identifying data are never logged.
 
-**Never log:** API keys, full HTML, user PII.
+---
 
-### 4.4 Firecrawl Mode Field
+## 4. Firecrawl logging notes
 
-`FIRECRAWL_*` events always carry a `mode` key — `"markdown"` for
-`scrape`, `"json"` for `scrape_json` — so the two paths are distinguishable
-in logs. `FIRECRAWL_RESPONSE` includes `chars` (Markdown) or `keys`
-(JSON), `duration_ms`, and `attempts`.
+`FIRECRAWL_*` log entries always include a `mode` field:
+
+- `"markdown"` for `scrape()`
+- `"json"` for `scrape_json()`
+
+This makes it easy to distinguish the deterministic search path from the product-detail extraction path in logs and traces.

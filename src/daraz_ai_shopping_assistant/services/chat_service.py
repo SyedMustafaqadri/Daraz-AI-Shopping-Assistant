@@ -25,6 +25,7 @@ Error handling policy:
 from __future__ import annotations
 
 import time
+from typing import Any
 
 from langchain_core.messages import AIMessage, HumanMessage
 
@@ -42,14 +43,14 @@ class ChatService:
         _graph: The compiled graph. Injected in tests to avoid LLM calls.
     """
 
-    def __init__(self, graph: object | None = None) -> None:
+    def __init__(self, graph: Any | None = None) -> None:
         """Initialise the service.
 
         Args:
             graph: Optional compiled graph to use. When ``None``, the
                 process-wide default from ``get_compiled_graph()`` is used.
         """
-        self._graph = graph
+        self._graph: Any | None = graph
 
     async def chat(self, message: str) -> ChatResponse:
         """Process a user message and return the assistant's response.
