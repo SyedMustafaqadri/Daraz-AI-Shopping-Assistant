@@ -65,6 +65,22 @@ src = ["src", "tests", "scripts"]
 select = ["E", "F", "W", "I", "N", "UP", "B", "C4", "SIM", "RUF"]
 ignore = ["E501"]
 
+# FastAPI's dependency-injection callables (Depends, Query, Path, ...) must
+# be callable in default arguments. B008 flags function calls in defaults,
+# which is correct for user code but wrong for these framework helpers.
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = [
+    "fastapi.Depends",
+    "fastapi.Query",
+    "fastapi.Path",
+    "fastapi.Header",
+    "fastapi.Cookie",
+    "fastapi.Body",
+    "fastapi.Form",
+    "fastapi.File",
+    "fastapi.Security",
+]
+
 [tool.ruff.lint.per-file-ignores]
 # Tests deliberately use naive datetimes and other lint-unfriendly patterns.
 "tests/**/*.py" = ["DTZ001", "S101"]

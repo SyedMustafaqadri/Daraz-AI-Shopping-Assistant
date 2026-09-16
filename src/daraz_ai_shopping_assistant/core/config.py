@@ -101,6 +101,28 @@ class Settings(BaseSettings):
     )
 
     # ------------------------------------------------------------------ #
+    # LLM (Phase 8 -- agent layer)
+    # ------------------------------------------------------------------ #
+    # `google_api_key` is optional at import time because the deterministic
+    # endpoints (search, product, recommendations) do not need it. It is
+    # validated lazily by the chat service, which raises a clear error when
+    # the endpoint is called without a configured key.
+    google_api_key: str = Field(
+        default="",
+        description="Google API key for Gemini. Loaded from GOOGLE_API_KEY.",
+    )
+    llm_model: str = Field(
+        default="gemini-2.5-flash",
+        description="LangChain model identifier for the agent layer.",
+    )
+    llm_temperature: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=2.0,
+        description="Sampling temperature. 0.0 for deterministic classification.",
+    )
+
+    # ------------------------------------------------------------------ #
     # Daraz
     # ------------------------------------------------------------------ #
     daraz_base_url: str = Field(
@@ -156,7 +178,7 @@ class Settings(BaseSettings):
     @field_validator("firecrawl_api_key", mode="before")
     @classmethod
     def _validate_firecrawl_key(cls, value: object) -> str:
-        """Reject missing, empty, or whitespace-only API keys early.
+        """Reject missing, empty, or whitespace-only Firecrawl keys early.
 
         Runs in ``mode="before"`` so that a missing environment variable
         (which arrives here as ``None``) is caught before pydantic tries to
@@ -172,8 +194,7 @@ class Settings(BaseSettings):
 
         Raises:
             ValueError: If the key is missing, non-string, empty, or
-                whitespace-only. Pydantic converts this into a
-                ``ValidationError`` at the model boundary.
+                whitespace-only.
         """
         if value is None:
             raise ValueError(

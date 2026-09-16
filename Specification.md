@@ -504,6 +504,41 @@ Fields should be populated only when the information is actually available.
 
 ---
 
+### 14.1 Known Limitations of Product-Detail Extraction
+
+The product-detail endpoint uses Firecrawl's LLM-driven structured
+extraction (ADR-001). Three sections are known to be unreliable on the
+current Daraz product-page layout and are documented here rather than
+chased indefinitely:
+
+- **`specifications`** may return `{}` even when the "Specifications of"
+  heading is present in Firecrawl's Markdown snapshot. The section renders
+  as a table whose structure varies between products, and LLM extraction
+  is inconsistent. Treat an empty `specifications` object as "not
+  available" rather than "not rendered" — the two are indistinguishable
+  from the response alone.
+
+- **`recommendations`** is always `[]` in the current implementation. The
+  recommendation carousel loads only after a scroll event, which the
+  scrape does not trigger. Extracting it requires a Firecrawl scroll
+  action, which adds cost and latency per request. Deferred to a future
+  iteration; see the "Recommendations" section in the project roadmap.
+
+- **`variants`** may occasionally return `[]` for a product that shows a
+  single variant chip. The extraction prompt now explicitly instructs the
+  model to include single-chip variants, but LLM output is
+  non-deterministic. Consumers should treat an empty `variants` list as
+  "not extracted" rather than "no variants exist".
+
+All other fields — `id`, `title`, `url`, `image`, `price`, `currency`,
+`original_price`, `discount_percentage`, `sold_count`, `rating`,
+`rating_count`, `location`, `description`, `seller`, `shipping`,
+`availability`, `reviews` — are extracted reliably on the product pages
+tested so far. The service-layer `_normalise_product_id` helper repairs
+the one known LLM quirk (dropping the "i" prefix from `id`).
+
+---
+
 # 15. Recommendation Strategy
 
 The MVP will NOT build a custom recommendation engine.

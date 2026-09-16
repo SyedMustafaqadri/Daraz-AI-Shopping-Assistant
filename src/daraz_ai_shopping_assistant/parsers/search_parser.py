@@ -5,9 +5,7 @@ Input:
 
 Output:
     A dictionary shaped like SearchResult but with search_query, filters,
-    and scraped_at omitted. Those are supplied by the service layer, which
-    combines the parser output with externally known context (the user's
-    query, the applied filters, and the scrape timestamp).
+    and scraped_at omitted. Those are supplied by the service layer.
 
 Design rules:
     - Pure function. No I/O, no network, no globals.
@@ -16,21 +14,25 @@ Design rules:
       strings like "Rs. 579".
     - No Pydantic validation here. The parser returns a best-effort dict;
       the service layer runs Product.model_validate on each entry and
-      discards the ones that fail (logging PRODUCT_VALIDATION_FAILED).
+      discards the ones that fail.
+
+Product card structure:
+    Each product card is expected to contain at least a title line and a
+    price line. Some cards also contain an image-anchor line (which Daraz
+    renders for above-the-fold products but not always for lazy-loaded
+    ones). Block splitting accounts for BOTH shapes:
+
+        [![alt](image_url)](product_url)     <- image anchor (optional)
+        [Title](product_url "Title")         <- title line (required)
+        Rs. 579                              <- price (required)
+        27% OffCoins save Rs. 29
+        184 sold
+        (40)
+        Punjab
 
 Adapting to layout changes:
     Every Daraz-specific regex lives at the top of this module. If Daraz
-    changes its Markdown structure, adjust those constants -- the
-    extraction logic below is written to read them declaratively.
-
-Example:
-    >>> from pathlib import Path
-    >>> md = Path("tests/fixtures/daraz_search_gaming_mouse.md").read_text()
-    >>> parsed = parse_search_results(md, current_page=1)
-    >>> parsed["total_items_found"]
-    11084
-    >>> len(parsed["products"]) > 0
-    True
+    changes its Markdown structure, adjust those constants.
 """
 
 from __future__ import annotations
@@ -52,12 +54,6 @@ _PAGINATION_LINK_RE: re.Pattern[str] = re.compile(
     r"\[(?P<page>\d+)\]\(https?://www\.daraz\.pk/catalog/\?[^)]*\)"
 )
 
-# Anchor that marks the start of a product card:
-#   [![alt](image)](product_url)
-_PRODUCT_ANCHOR_RE: re.Pattern[str] = re.compile(
-    r"\[!\[[^\]]*\]\([^)]+\)\]\(https?://www\.daraz\.pk/products/[^)]+\.html\)"
-)
-
 # Image line -- matches when it sits alone on its own line:
 #   [![alt](image_url)](product_url)
 _IMAGE_LINE_RE: re.Pattern[str] = re.compile(
@@ -66,8 +62,8 @@ _IMAGE_LINE_RE: re.Pattern[str] = re.compile(
     re.MULTILINE,
 )
 
-# Title line -- matches when it sits alone on its own line and does NOT start
-# with the image-anchor prefix:
+# Title line -- matches when it sits alone on its own line and does NOT
+# start with the image-anchor prefix:
 #   [Title](product_url "Title")
 _TITLE_LINE_RE: re.Pattern[str] = re.compile(
     r"^(?!\[!\[)\[(?P<title>[^\]]+)\]"
@@ -245,42 +241,22 @@ def _extract_location(block: str) -> str | None:
 def _parse_product_block(block: str) -> dict[str, object] | None:
     """Parse a single product block into a raw dict.
 
-    The block is expected to start at an image-anchor line and end just
-    before the next product (or at the end of the results section).
+    A block is considered a valid product when it contains a title line
+    (which carries the canonical URL) and a price line. The image anchor
+    is optional -- Daraz does not render it for lazy-loaded products.
 
     Args:
         block: Markdown for one product card.
 
     Returns:
         A dict of extracted fields, or None if the block is not a valid
-        product (missing URL, ID, or price). Invalid blocks are silently
-        dropped -- the service layer only logs validation failures for
-        products that reach Pydantic.
-
-    Example block structure (as rendered by Firecrawl):
-
-        [![alt](image_url)](product_url)
-
-        [Title](product_url "Title")
-
-        Rs. 579
-
-        27% OffCoins save Rs. 29
-
-        184 sold
-
-        (40)
-
-        Punjab
+        product (missing URL, ID, or price).
     """
-    image_match = _IMAGE_LINE_RE.search(block)
     title_match = _TITLE_LINE_RE.search(block)
-
-    # A valid product must have both an image-anchor line and a title line.
-    if not (image_match and title_match):
+    if not title_match:
         return None
 
-    url = image_match.group("url")
+    url = title_match.group("url")
     id_match = _PRODUCT_ID_RE.search(url)
     if not id_match:
         return None
@@ -289,6 +265,7 @@ def _parse_product_block(block: str) -> dict[str, object] | None:
     if not price_match:
         return None
 
+    image_match = _IMAGE_LINE_RE.search(block)
     discount_match = _DISCOUNT_RE.search(block)
     coins_match = _COINS_RE.search(block)
     sold_match = _SOLD_RE.search(block)
@@ -305,7 +282,7 @@ def _parse_product_block(block: str) -> dict[str, object] | None:
         "id": id_match.group("id"),
         "title": title_match.group("title").strip(),
         "url": url,
-        "image": image_match.group("image"),
+        "image": image_match.group("image") if image_match else None,
         "price": float(_to_int(price_match.group("price")) or 0),
         "currency": "PKR",
         "original_price": None,  # not rendered on search cards
@@ -344,24 +321,48 @@ def _strip_trailing_sections(markdown: str) -> str:
 def _split_into_product_blocks(markdown: str) -> list[str]:
     """Split the search-results Markdown into one chunk per product.
 
-    Each product card starts with an image-link anchor
-    [![alt](image)](product_url). The function returns the substring from
-    each anchor up to the next anchor (or end of input).
+    Both image anchors and title lines are treated as product boundaries.
+    This is essential because Daraz does not always render the image
+    anchor for products below the fold (lazy loading), but the title line
+    is present for every rendered product.
+
+    Algorithm:
+        1. Collect the position of every image-anchor line and every title
+           line in the input.
+        2. Deduplicate by product URL -- a product's "block start" is the
+           first line (image or title) that references it.
+        3. Slice the Markdown between consecutive block starts.
 
     Args:
         markdown: Trimmed Markdown of the search results section.
 
     Returns:
-        A list of per-product Markdown chunks. Empty when no anchors match.
+        A list of per-product Markdown chunks. Empty when no products are
+        found.
     """
-    anchors = list(_PRODUCT_ANCHOR_RE.finditer(markdown))
-    if not anchors:
+    occurrences: list[tuple[int, str]] = []
+    for m in _IMAGE_LINE_RE.finditer(markdown):
+        occurrences.append((m.start(), m.group("url")))
+    for m in _TITLE_LINE_RE.finditer(markdown):
+        occurrences.append((m.start(), m.group("url")))
+
+    if not occurrences:
         return []
 
+    # Stable sort by position so image anchors (earlier) precede title
+    # lines (later) for the same URL.
+    occurrences.sort(key=lambda pair: pair[0])
+
+    seen: set[str] = set()
+    boundaries: list[int] = []
+    for position, url in occurrences:
+        if url not in seen:
+            seen.add(url)
+            boundaries.append(position)
+
     blocks: list[str] = []
-    for i, anchor in enumerate(anchors):
-        start = anchor.start()
-        end = anchors[i + 1].start() if i + 1 < len(anchors) else len(markdown)
+    for i, start in enumerate(boundaries):
+        end = boundaries[i + 1] if i + 1 < len(boundaries) else len(markdown)
         blocks.append(markdown[start:end])
     return blocks
 

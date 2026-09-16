@@ -1,4 +1,4 @@
-"""Firecrawl adapter — the single boundary between this app and Firecrawl.
+"""Firecrawl adapter -- the single boundary between this app and Firecrawl.
 
 Responsibilities:
     1. Wrap the ``firecrawl`` SDK so no other module imports it directly.
@@ -11,13 +11,23 @@ Responsibilities:
 
 Two entry points (see ``docs/ARCHITECTURE-DECISIONS.md`` ADR-001):
 
-    - :meth:`FirecrawlAdapter.scrape` — returns Markdown. Used for **search
+    - :meth:`FirecrawlAdapter.scrape` -- returns Markdown. Used for **search
       result pages** and any other page where the layout is uniform enough
       for deterministic parsing.
-    - :meth:`FirecrawlAdapter.scrape_json` — returns a dict conforming to a
+    - :meth:`FirecrawlAdapter.scrape_json` -- returns a dict conforming to a
       JSON Schema. Used **only** for **product detail pages**, where the
       layout is irregular and LLM-driven extraction is more reliable than
       regex.
+
+Rendering options (added after diagnosing an incomplete product snapshot):
+
+    Daraz product pages render several sections (description, specifications,
+    reviews, recommendations) lazily, after the initial document load. A
+    default scrape returns only the above-the-fold content, and Firecrawl's
+    ``only_main_content`` filter drops even more. The adapter therefore
+    supports two options -- ``wait_for_ms`` and ``only_main_content`` -- that
+    are threaded straight through to the SDK. See ``daraz.py`` for how they
+    are applied to product pages.
 
 Non-responsibilities:
     - This module knows nothing about Daraz, products, or parsers.
@@ -48,6 +58,15 @@ from daraz_ai_shopping_assistant.core.exceptions import (
 from daraz_ai_shopping_assistant.core.logging import get_logger
 
 logger = get_logger(__name__)
+
+#: Fallback prompt used when a caller passes ``prompt=None``. Firecrawl's
+#: current ``json`` format requires a non-empty ``prompt`` field, so the
+#: adapter always supplies one. Kept deliberately generic -- callers that
+#: need a tailored instruction should pass their own.
+_DEFAULT_JSON_PROMPT = (
+    "Extract the requested data from the page according to the provided "
+    "schema. Omit fields you cannot determine from the page -- never guess."
+)
 
 # ---------------------------------------------------------------------- #
 # Exception classification helpers
@@ -100,7 +119,7 @@ def _is_retryable(exc: BaseException) -> bool:
     """Return True when the failure is worth retrying.
 
     Only timeouts and rate limits are retried. A 4xx auth error or a bad
-    URL is not retried — retrying would just burn quota.
+    URL is not retried -- retrying would just burn quota.
 
     Args:
         exc: The exception to inspect.
@@ -192,8 +211,8 @@ def _extract_json(result: Any) -> dict[str, Any]:
     shapes (v2 Document, v2 dict, v1 wrapper).
 
     Args:
-        result: The object returned by ``AsyncFirecrawl.scrape`` when
-            ``formats`` includes ``json``.
+        result: The object returned by ``AsyncFirecrawl.scrape`` when the
+            ``json`` format is requested.
 
     Returns:
         The structured payload as a dictionary.
@@ -269,9 +288,15 @@ class FirecrawlAdapter:
         self._backoff_base_seconds: float = backoff_base_seconds
 
     # ------------------------------------------------------------------ #
-    # Markdown path — search result pages and other uniform layouts
+    # Markdown path -- search result pages and other uniform layouts
     # ------------------------------------------------------------------ #
-    async def scrape(self, url: str) -> str:
+    async def scrape(
+        self,
+        url: str,
+        *,
+        wait_for_ms: int | None = None,
+        only_main_content: bool | None = None,
+    ) -> str:
         """Fetch a URL and return its content as Markdown.
 
         Use this for **search result pages** and any other page whose layout
@@ -284,6 +309,13 @@ class FirecrawlAdapter:
 
         Args:
             url: The fully-qualified HTTP(S) URL to scrape.
+            wait_for_ms: Milliseconds to wait after page load before
+                snapshotting. ``None`` uses Firecrawl's default. Raise this
+                for pages with lazily-rendered sections.
+            only_main_content: When ``True``, Firecrawl strips navigation,
+                footers, and other non-main content. ``None`` uses
+                Firecrawl's default. Set to ``False`` when the sections you
+                need are being classified as non-main and dropped.
 
         Returns:
             The page content as Markdown.
@@ -295,9 +327,23 @@ class FirecrawlAdapter:
         """
         logger.info(
             "FIRECRAWL_REQUEST",
-            extra={"ctx": {"url": url, "mode": "markdown"}},
+            extra={
+                "ctx": {
+                    "url": url,
+                    "mode": "markdown",
+                    "wait_for_ms": wait_for_ms,
+                    "only_main_content": only_main_content,
+                }
+            },
         )
         started_at = time.monotonic()
+
+        # Build the SDK kwargs once -- the shape does not change per attempt.
+        scrape_kwargs: dict[str, Any] = {"formats": ["markdown"]}
+        if wait_for_ms is not None:
+            scrape_kwargs["wait_for"] = wait_for_ms
+        if only_main_content is not None:
+            scrape_kwargs["only_main_content"] = only_main_content
 
         last_exc: BaseException | None = None
         attempt = 0
@@ -305,7 +351,7 @@ class FirecrawlAdapter:
         while attempt <= self._max_retries:
             attempt += 1
             try:
-                result = await self._client.scrape(url, formats=["markdown"])
+                result = await self._client.scrape(url, **scrape_kwargs)
                 markdown = _extract_markdown(result)
             except Exception as exc:
                 last_exc = exc
@@ -352,7 +398,7 @@ class FirecrawlAdapter:
         )
 
     # ------------------------------------------------------------------ #
-    # JSON path — product detail pages only
+    # JSON path -- product detail pages only
     # ------------------------------------------------------------------ #
     async def scrape_json(
         self,
@@ -361,13 +407,20 @@ class FirecrawlAdapter:
         schema: dict[str, Any],
         prompt: str | None = None,
         max_age_ms: int | None = None,
+        wait_for_ms: int | None = None,
+        only_main_content: bool | None = None,
     ) -> dict[str, Any]:
         """Fetch a URL and return structured data matching ``schema``.
 
         Uses Firecrawl's LLM-driven structured extraction. This is the entry
         point for **product detail pages only** (see ADR-001). Do not use it
-        for search result pages — those go through :meth:`scrape` and the
+        for search result pages -- those go through :meth:`scrape` and the
         deterministic Markdown parser.
+
+        Firecrawl's current API expects the ``json`` format as a **dict**
+        with three top-level keys: ``type``, ``prompt``, and ``schema``.
+        The older ``formats=["json"]`` + ``json_options={...}`` shape is no
+        longer accepted.
 
         Retries transient failures (timeouts, rate limits) with exponential
         backoff, mirroring :meth:`scrape`.
@@ -377,11 +430,20 @@ class FirecrawlAdapter:
             schema: A JSON Schema (dict) describing the shape of the payload
                 Firecrawl should produce. For Pydantic models, call
                 ``Model.model_json_schema()`` to obtain this dict.
-            prompt: Optional extraction instruction to guide the LLM. Use
-                this to disambiguate fields the schema alone cannot.
+            prompt: Optional extraction instruction to guide the LLM. When
+                ``None``, a generic default is used (Firecrawl requires a
+                non-empty prompt field).
             max_age_ms: Maximum age, in milliseconds, of a reused Firecrawl
                 cache entry. ``None`` lets Firecrawl choose. ``0`` forces a
                 live scrape (see ``references/freshness-and-liveness.md``).
+            wait_for_ms: Milliseconds to wait after page load before
+                snapshotting. Raise this for pages with lazily-rendered
+                sections -- Daraz product descriptions, specifications,
+                reviews, and recommendations are all below the fold.
+            only_main_content: When ``True``, Firecrawl strips navigation,
+                footers, and other non-main content. Set to ``False`` on
+                pages where the sections you need are being classified as
+                non-main and dropped.
 
         Returns:
             A dict conforming to ``schema``.
@@ -393,20 +455,35 @@ class FirecrawlAdapter:
         """
         logger.info(
             "FIRECRAWL_REQUEST",
-            extra={"ctx": {"url": url, "mode": "json"}},
+            extra={
+                "ctx": {
+                    "url": url,
+                    "mode": "json",
+                    "wait_for_ms": wait_for_ms,
+                    "only_main_content": only_main_content,
+                }
+            },
         )
         started_at = time.monotonic()
 
-        # Build the SDK kwargs once — the shape does not change per attempt.
-        scrape_kwargs: dict[str, Any] = {
-            "formats": ["json"],
-            "json_options": {
-                "schema": schema,
-                **({"prompt": prompt} if prompt else {}),
-            },
+        # Firecrawl's json format requires all three keys at the top level
+        # of the format dict. prompt must be non-empty; fall back to the
+        # default when the caller did not supply one.
+        resolved_prompt = prompt if prompt else _DEFAULT_JSON_PROMPT
+        json_format: dict[str, Any] = {
+            "type": "json",
+            "prompt": resolved_prompt,
+            "schema": schema,
         }
+
+        # Build the SDK kwargs once -- the shape does not change per attempt.
+        scrape_kwargs: dict[str, Any] = {"formats": [json_format]}
         if max_age_ms is not None:
             scrape_kwargs["max_age"] = max_age_ms
+        if wait_for_ms is not None:
+            scrape_kwargs["wait_for"] = wait_for_ms
+        if only_main_content is not None:
+            scrape_kwargs["only_main_content"] = only_main_content
 
         last_exc: BaseException | None = None
         attempt = 0
@@ -452,7 +529,7 @@ class FirecrawlAdapter:
                 )
                 return payload
 
-        # Defensive — see :meth:`scrape`.
+        # Defensive -- see :meth:`scrape`.
         raise ScraperError(
             "Firecrawl adapter exhausted retries without a definitive result.",
             url=url,

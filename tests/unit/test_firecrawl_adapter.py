@@ -3,10 +3,13 @@
 The Firecrawl SDK client is fully mocked, so these tests never touch the
 network and never require an API key. They verify:
 
-    - Happy-path Markdown and JSON extraction from multiple SDK response shapes.
+    - Happy-path Markdown and JSON extraction from multiple SDK response
+      shapes.
     - Exception classification (timeout, rate limit, generic).
     - Retry behaviour with exponential backoff.
     - Structured logging events for both modes.
+    - The JSON format's current Firecrawl shape (a dict with type,
+      prompt, and schema keys), including the default-prompt fallback.
 """
 
 from __future__ import annotations
@@ -22,6 +25,7 @@ from daraz_ai_shopping_assistant.core.exceptions import (
     UpstreamRateLimitError,
 )
 from daraz_ai_shopping_assistant.scrapers.firecrawl import (
+    _DEFAULT_JSON_PROMPT,
     FirecrawlAdapter,
     _extract_json,
     _extract_markdown,
@@ -51,7 +55,7 @@ def _document(markdown: str) -> Any:
         markdown: Markdown content to embed.
 
     Returns:
-        A simple object with a ``.markdown`` attribute.
+        A simple object with a ``.markdown`` attribute and ``.json=None``.
     """
     doc = MagicMock()
     doc.markdown = markdown
@@ -65,7 +69,7 @@ def _json_document(payload: dict[str, Any]) -> Any:
         payload: The structured payload to embed.
 
     Returns:
-        A simple object with a ``.json`` attribute and no ``.markdown``.
+        A simple object with a ``.json`` attribute and ``.markdown=None``.
     """
     doc = MagicMock()
     doc.markdown = None
@@ -133,7 +137,7 @@ def test_extract_json_missing_payload_raises() -> None:
         _extract_json({"foo": "bar"})
 
 def test_extract_json_does_not_confuse_markdown_only_response() -> None:
-    """A Markdown-only response must raise ScraperError when JSON is requested."""
+    """A Markdown-only response must raise ScraperError for JSON requests."""
     with pytest.raises(ScraperError):
         _extract_json(_document("# hello"))
 
@@ -188,8 +192,8 @@ def patched_client() -> Any:
     """Patch ``AsyncFirecrawl`` in the adapter module.
 
     Yields:
-        The mocked ``AsyncFirecrawl`` class, whose ``.return_value`` is the
-        client instance used by the adapter under test.
+        The mocked ``AsyncFirecrawl`` class, whose ``.return_value`` is
+        the client instance used by the adapter under test.
     """
     with patch(
         "daraz_ai_shopping_assistant.scrapers.firecrawl.AsyncFirecrawl"
@@ -197,7 +201,7 @@ def patched_client() -> Any:
         yield mock_cls
 
 # ---------------------------------------------------------------------- #
-# FirecrawlAdapter.scrape — happy path
+# FirecrawlAdapter.scrape -- happy path
 # ---------------------------------------------------------------------- #
 @pytest.mark.asyncio()
 async def test_scrape_returns_markdown(patched_client: Any) -> None:
@@ -209,7 +213,9 @@ async def test_scrape_returns_markdown(patched_client: Any) -> None:
     result = await adapter.scrape("https://example.com")
 
     assert result == "# Daraz"
-    client.scrape.assert_awaited_once_with("https://example.com", formats=["markdown"])
+    client.scrape.assert_awaited_once_with(
+        "https://example.com", formats=["markdown"]
+    )
 
 @pytest.mark.asyncio()
 async def test_scrape_passes_api_key_to_client(patched_client: Any) -> None:
@@ -218,7 +224,7 @@ async def test_scrape_passes_api_key_to_client(patched_client: Any) -> None:
     patched_client.assert_called_once_with(api_key="fc-abc123")
 
 # ---------------------------------------------------------------------- #
-# FirecrawlAdapter.scrape — retries
+# FirecrawlAdapter.scrape -- retries
 # ---------------------------------------------------------------------- #
 @pytest.mark.asyncio()
 async def test_scrape_retries_on_rate_limit(patched_client: Any) -> None:
@@ -252,7 +258,9 @@ async def test_scrape_gives_up_after_max_retries(patched_client: Any) -> None:
     assert client.scrape.await_count == 3  # initial + 2 retries
 
 @pytest.mark.asyncio()
-async def test_scrape_does_not_retry_on_generic_error(patched_client: Any) -> None:
+async def test_scrape_does_not_retry_on_generic_error(
+    patched_client: Any,
+) -> None:
     """A non-retryable failure aborts immediately."""
     client = patched_client.return_value
     client.scrape = AsyncMock(side_effect=ValueError("bad input"))
@@ -282,7 +290,7 @@ async def test_scrape_timeout_after_retries_maps_correctly(
         await adapter.scrape("https://example.com")
 
 # ---------------------------------------------------------------------- #
-# FirecrawlAdapter.scrape_json — happy path
+# FirecrawlAdapter.scrape_json -- happy path
 # ---------------------------------------------------------------------- #
 @pytest.mark.asyncio()
 async def test_scrape_json_returns_payload(patched_client: Any) -> None:
@@ -298,8 +306,16 @@ async def test_scrape_json_returns_payload(patched_client: Any) -> None:
     assert result == payload
 
 @pytest.mark.asyncio()
-async def test_scrape_json_passes_schema_and_prompt(patched_client: Any) -> None:
-    """The schema and prompt are forwarded to the SDK as json_options."""
+async def test_scrape_json_passes_schema_and_prompt(
+    patched_client: Any,
+) -> None:
+    """The schema and prompt are forwarded in the new Firecrawl format shape.
+
+    Firecrawl's current API expects the json format as a dict inside the
+    ``formats`` list, with three top-level keys: ``type``, ``prompt``, and
+    ``schema``. The old ``formats=["json"] + json_options={...}`` shape is
+    no longer accepted.
+    """
     client = patched_client.return_value
     client.scrape = AsyncMock(return_value=_json_document({"ok": True}))
 
@@ -311,13 +327,27 @@ async def test_scrape_json_passes_schema_and_prompt(patched_client: Any) -> None
 
     client.scrape.assert_awaited_once()
     _, kwargs = client.scrape.call_args
-    assert kwargs["formats"] == ["json"]
-    assert kwargs["json_options"]["schema"] == schema
-    assert kwargs["json_options"]["prompt"] == "Extract product info"
+    formats = kwargs["formats"]
+    assert isinstance(formats, list)
+    assert len(formats) == 1
+    json_format = formats[0]
+    assert isinstance(json_format, dict)
+    assert json_format["type"] == "json"
+    assert json_format["prompt"] == "Extract product info"
+    assert json_format["schema"] == schema
+    # The legacy key must not be present.
+    assert "json_options" not in kwargs
 
 @pytest.mark.asyncio()
-async def test_scrape_json_omits_prompt_when_not_supplied(patched_client: Any) -> None:
-    """When no prompt is given, json_options must only contain the schema."""
+async def test_scrape_json_uses_default_prompt_when_not_supplied(
+    patched_client: Any,
+) -> None:
+    """When no prompt is given, the default prompt is used.
+
+    Firecrawl's json format requires a non-empty prompt field, so the
+    adapter always supplies one. When the caller omits ``prompt``, the
+    module-level ``_DEFAULT_JSON_PROMPT`` is substituted.
+    """
     client = patched_client.return_value
     client.scrape = AsyncMock(return_value=_json_document({"ok": True}))
 
@@ -326,7 +356,9 @@ async def test_scrape_json_omits_prompt_when_not_supplied(patched_client: Any) -
     await adapter.scrape_json("https://example.com", schema=schema)
 
     _, kwargs = client.scrape.call_args
-    assert "prompt" not in kwargs["json_options"]
+    json_format = kwargs["formats"][0]
+    assert json_format["prompt"] == _DEFAULT_JSON_PROMPT
+    assert json_format["schema"] == schema
 
 @pytest.mark.asyncio()
 async def test_scrape_json_forwards_max_age(patched_client: Any) -> None:
@@ -342,15 +374,66 @@ async def test_scrape_json_forwards_max_age(patched_client: Any) -> None:
     _, kwargs = client.scrape.call_args
     assert kwargs["max_age"] == 0
 
+@pytest.mark.asyncio()
+async def test_scrape_json_forwards_wait_for(patched_client: Any) -> None:
+    """``wait_for_ms`` is forwarded to the SDK as ``wait_for``."""
+    client = patched_client.return_value
+    client.scrape = AsyncMock(return_value=_json_document({"ok": True}))
+
+    adapter = FirecrawlAdapter(api_key="fc-test", max_retries=0)
+    await adapter.scrape_json(
+        "https://example.com",
+        schema={"type": "object"},
+        wait_for_ms=5000,
+    )
+
+    _, kwargs = client.scrape.call_args
+    assert kwargs["wait_for"] == 5000
+
+@pytest.mark.asyncio()
+async def test_scrape_json_forwards_only_main_content(
+    patched_client: Any,
+) -> None:
+    """``only_main_content`` is forwarded when set."""
+    client = patched_client.return_value
+    client.scrape = AsyncMock(return_value=_json_document({"ok": True}))
+
+    adapter = FirecrawlAdapter(api_key="fc-test", max_retries=0)
+    await adapter.scrape_json(
+        "https://example.com",
+        schema={"type": "object"},
+        only_main_content=False,
+    )
+
+    _, kwargs = client.scrape.call_args
+    assert kwargs["only_main_content"] is False
+
+@pytest.mark.asyncio()
+async def test_scrape_json_omits_unset_options(patched_client: Any) -> None:
+    """Unset rendering options do not appear in the SDK call."""
+    client = patched_client.return_value
+    client.scrape = AsyncMock(return_value=_json_document({"ok": True}))
+
+    adapter = FirecrawlAdapter(api_key="fc-test", max_retries=0)
+    await adapter.scrape_json("https://example.com", schema={"type": "object"})
+
+    _, kwargs = client.scrape.call_args
+    assert "max_age" not in kwargs
+    assert "wait_for" not in kwargs
+    assert "only_main_content" not in kwargs
+
 # ---------------------------------------------------------------------- #
-# FirecrawlAdapter.scrape_json — retries and errors
+# FirecrawlAdapter.scrape_json -- retries and errors
 # ---------------------------------------------------------------------- #
 @pytest.mark.asyncio()
 async def test_scrape_json_retries_on_rate_limit(patched_client: Any) -> None:
     """A rate-limit on the JSON path is retried and eventually succeeds."""
     client = patched_client.return_value
     client.scrape = AsyncMock(
-        side_effect=[FakeFirecrawlRateLimit("429"), _json_document({"ok": True})]
+        side_effect=[
+            FakeFirecrawlRateLimit("429"),
+            _json_document({"ok": True}),
+        ]
     )
 
     adapter = FirecrawlAdapter(
@@ -373,10 +456,12 @@ async def test_scrape_json_missing_payload_raises_scraper_error(
 
     adapter = FirecrawlAdapter(api_key="fc-test", max_retries=0)
     with pytest.raises(ScraperError):
-        await adapter.scrape_json("https://example.com", schema={"type": "object"})
+        await adapter.scrape_json(
+            "https://example.com", schema={"type": "object"}
+        )
 
 # ---------------------------------------------------------------------- #
-# FirecrawlAdapter — logging
+# FirecrawlAdapter -- logging
 # ---------------------------------------------------------------------- #
 @pytest.mark.asyncio()
 async def test_scrape_logs_request_and_response(
@@ -389,7 +474,9 @@ async def test_scrape_logs_request_and_response(
 
     adapter = FirecrawlAdapter(api_key="fc-test", max_retries=0)
 
-    with caplog.at_level("INFO", logger="daraz_ai_shopping_assistant.scrapers.firecrawl"):
+    with caplog.at_level(
+        "INFO", logger="daraz_ai_shopping_assistant.scrapers.firecrawl"
+    ):
         await adapter.scrape("https://example.com")
 
     messages = [record.message for record in caplog.records]
@@ -411,7 +498,9 @@ async def test_scrape_logs_retry(
         api_key="fc-test", max_retries=1, backoff_base_seconds=0.0
     )
 
-    with caplog.at_level("WARNING", logger="daraz_ai_shopping_assistant.scrapers.firecrawl"):
+    with caplog.at_level(
+        "WARNING", logger="daraz_ai_shopping_assistant.scrapers.firecrawl"
+    ):
         await adapter.scrape("https://example.com")
 
     retries = [r for r in caplog.records if r.message == "FIRECRAWL_RETRY"]
@@ -428,9 +517,15 @@ async def test_scrape_json_logs_request_with_json_mode(
 
     adapter = FirecrawlAdapter(api_key="fc-test", max_retries=0)
 
-    with caplog.at_level("INFO", logger="daraz_ai_shopping_assistant.scrapers.firecrawl"):
-        await adapter.scrape_json("https://example.com", schema={"type": "object"})
+    with caplog.at_level(
+        "INFO", logger="daraz_ai_shopping_assistant.scrapers.firecrawl"
+    ):
+        await adapter.scrape_json(
+            "https://example.com", schema={"type": "object"}
+        )
 
-    request_records = [r for r in caplog.records if r.message == "FIRECRAWL_REQUEST"]
+    request_records = [
+        r for r in caplog.records if r.message == "FIRECRAWL_REQUEST"
+    ]
     assert len(request_records) == 1
     assert request_records[0].ctx["mode"] == "json"  # type: ignore[attr-defined]

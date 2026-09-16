@@ -10,6 +10,23 @@ Responsibilities:
     3. Delegate the actual HTTP call to :class:`FirecrawlAdapter`.
     4. Return raw content to the caller -- no parsing, no validation.
 
+Rendering options (why product pages pass them):
+
+    Daraz product pages render several sections (description,
+    specifications, reviews, recommendations) lazily after the initial
+    document load. A default Firecrawl scrape returns only the
+    above-the-fold content plus a lot of navigation chrome. Empirically,
+    a default Markdown scrape of a Daraz product page contains none of
+    the section headings -- see ``scripts/diagnose_product_page.py``.
+
+    The fix is two scrape options, applied only to product pages:
+
+    - ``wait_for``: lets the lazily-rendered sections appear.
+    - ``only_main_content=False``: stops Firecrawl from classifying those
+      sections as non-main and dropping them.
+
+    Search-result pages render eagerly and do not need either option.
+
 Search URL format (Daraz.pk):
 
     https://www.daraz.pk/catalog/?q=Gaming%20Mouse&price=-800&page=2
@@ -38,18 +55,91 @@ from daraz_ai_shopping_assistant.scrapers.firecrawl import FirecrawlAdapter
 logger = get_logger(__name__)
 
 # ---------------------------------------------------------------------- #
+# Product-page rendering options
+# ---------------------------------------------------------------------- #
+#: Milliseconds to wait after page load before snapshotting. Daraz's
+#: below-the-fold sections (description, specifications, reviews,
+#: recommendations) render lazily. Five seconds is generous enough for a
+#: cold render on a slow connection, and short enough that the request
+#: still feels interactive.
+_PRODUCT_WAIT_FOR_MS: int = 5000
+
+#: Firecrawl's ``only_main_content`` heuristic classifies navigation and
+#: sidebars correctly but is too aggressive on Daraz product pages -- it
+#: drops the very sections we need. Disable it for product pages only.
+_PRODUCT_ONLY_MAIN_CONTENT: bool = False
+
+# ---------------------------------------------------------------------- #
 # Prompt for LLM-driven product extraction (ADR-001)
 # ---------------------------------------------------------------------- #
+# The prompt walks the page section-by-section, mirroring how a human
+# would read it top to bottom. It complements the rendering options
+# above: the options ensure the sections appear in the snapshot, the
+# prompt tells the LLM where to look for them and how to handle
+# frequently-observed extraction quirks (duplicate paragraphs,
+# single-variant lists, bare-numeric ids).
 _PRODUCT_EXTRACTION_PROMPT: str = (
-    "Extract structured product details from this Daraz.pk product page. "
-    "Fill in every field you can determine from the page. For fields that "
-    "are not present, omit them entirely -- never guess, never invent. "
-    "Numeric fields must be numbers, not formatted strings: price is a bare "
-    "number (579, not 'Rs. 579'), discount_percentage is an integer without "
-    "the percent sign, coins_save and sold_count are integers. currency is "
-    "always 'PKR'. specifications is a flat object mapping label to string "
-    "value. seller.positive_rate is a number 0-100. variants, reviews, and "
-    "recommendations are arrays; use an empty array when none are shown."
+    "You are extracting structured product data from a single Daraz.pk "
+    "product detail page. Read the page from top to bottom and produce a "
+    "JSON object matching the provided schema.\n"
+    "\n"
+    "Where each field lives on a Daraz product page:\n"
+    "- id, title, url, image, price, original_price, discount_percentage, "
+    "currency: the top block next to the main product image.\n"
+    "- sold_count, rating, rating_count: just below the title. rating is "
+    "sometimes rendered as an image whose alt text reads '<N> out of 5 "
+    "stars' -- if you can read that value, use it; otherwise omit rating.\n"
+    "- availability: next to the 'Add to Cart' / 'Buy Now' buttons "
+    "(e.g. 'In Stock').\n"
+    "- location: the seller location line, e.g. 'Sindh, Karachi - "
+    "Gulshan-e-Iqbal, Block 15'.\n"
+    "- variants: the colour / size / bundle chip selector. If ANY chip is "
+    "rendered, extract every chip as a separate variant entry. A single "
+    "rendered variant is still a valid variant list -- do not return an "
+    "empty array when the page shows a variant name.\n"
+    "- seller: the 'Sold by' or seller-info block. seller.name and "
+    "seller.positive_rate (a number 0-100) are usually shown there.\n"
+    "- shipping: the delivery / shipping block. shipping.fee is a number "
+    "in PKR, shipping.free_shipping is true only when the page explicitly "
+    "says 'Free Shipping', shipping.estimated_delivery is the human string "
+    "like 'Guaranteed by 21-24 Sep'.\n"
+    "- description: the 'Product Description' or 'Product details' "
+    "section, usually below the buy box. It may be collapsed behind a "
+    "'Read more' link. Extract the full text, not just the title. "
+    "Extract the description exactly once -- if the same paragraph or "
+    "sentence appears multiple times on the page, include it only once "
+    "in the output.\n"
+    "- specifications: the specs table below the description. Return it "
+    "as a flat object mapping label to string value, for example "
+    "{'Brand': 'GTS', 'Model': '1550'}.\n"
+    "- reviews: the 'Ratings & Reviews' section. Each review has a star "
+    "rating (number 0-5), comment text, author name, and date string. "
+    "Extract every review visible on the page.\n"
+    "- recommendations: the 'Recommended for you' / 'You may also like' "
+    "/ 'Similar products' carousel. Extract each card's id, title, url, "
+    "image, price, and discount_percentage.\n"
+    "\n"
+    "Numeric rules (strict):\n"
+    "- price, original_price, shipping.fee: bare numbers in PKR. Write "
+    "579, not 'Rs. 579' and not '579 PKR'.\n"
+    "- discount_percentage: integer without the percent sign.\n"
+    "- coins_save, sold_count, rating_count: integers.\n"
+    "- rating, seller.rating: numbers between 0 and 5.\n"
+    "- seller.positive_rate: number between 0 and 100.\n"
+    "- currency is always 'PKR'.\n"
+    "\n"
+    "Identifier rules (strict):\n"
+    "- id is the full Daraz identifier including the leading 'i' prefix. "
+    "It is taken from the product URL /products/<id>.html, so the prefix "
+    "is always present. Example: 'i927677133', never '927677133'.\n"
+    "\n"
+    "Completeness rules:\n"
+    "- Extract every section above that is present on the page. Do not "
+    "skip a section because it appears below the fold.\n"
+    "- If a section is genuinely not rendered on the page, omit that "
+    "field entirely -- do not include it with an empty string, empty "
+    "object, or empty array. The schema's defaults will fill it in.\n"
+    "- Never guess, never invent values that are not visible on the page.\n"
 )
 
 # ---------------------------------------------------------------------- #
@@ -72,19 +162,17 @@ def build_search_url(
         max_price: Upper price bound in PKR, or ``None``.
         page: 1-indexed page number. ``None`` and ``1`` both omit the
             ``page`` parameter (Daraz's default is page 1).
-        base_url: Override for ``settings.daraz_base_url``. Mainly for tests.
+        base_url: Override for ``settings.daraz_base_url``. For tests.
         search_path: Override for ``settings.daraz_search_path``.
 
     Returns:
-        A fully-qualified Daraz search URL. Spaces in the query are encoded
-        as ``%20`` (Daraz accepts both ``%20`` and ``+``; we match Daraz's
-        own rendered URLs).
+        A fully-qualified Daraz search URL. Spaces in the query are
+        encoded as ``%20`` (Daraz accepts both ``%20`` and ``+``; we
+        match Daraz's own rendered URLs).
 
     Example:
         >>> build_search_url("gaming mouse", max_price=800)
         'https://www.daraz.pk/catalog/?q=gaming%20mouse&price=-800'
-        >>> build_search_url("gaming mouse", min_price=100, max_price=800, page=2)
-        'https://www.daraz.pk/catalog/?q=gaming%20mouse&price=100-800&page=2'
     """
     resolved_base = (base_url or settings.daraz_base_url).rstrip("/")
     resolved_path = search_path or settings.daraz_search_path
@@ -108,13 +196,13 @@ def build_product_url(
 ) -> str:
     """Build a canonical Daraz product-page URL from a product ID.
 
-    Daraz renders product URLs as ``/products/{slug}-{id}.html``. The slug
-    is optional -- Daraz redirects ``/products/{id}.html`` to the canonical
-    URL -- so we construct the slug-less form.
+    Daraz renders product URLs as ``/products/{slug}-{id}.html``. The
+    slug is optional -- Daraz redirects ``/products/{id}.html`` to the
+    canonical URL -- so we construct the slug-less form.
 
     Args:
         product_id: Daraz product identifier (e.g., ``"i1959941878"``).
-        base_url: Override for ``settings.daraz_base_url``. Mainly for tests.
+        base_url: Override for ``settings.daraz_base_url``. For tests.
 
     Returns:
         A fully-qualified Daraz product URL.
@@ -148,8 +236,8 @@ def _build_price_param(
     if min_price is None and max_price is None:
         return None
 
-    # Daraz expects integer values in the price parameter; fractional bounds
-    # are truncated (e.g., 800.50 -> 800). This matches the UI behaviour.
+    # Daraz expects integer values in the price parameter; fractional
+    # bounds are truncated (e.g., 800.50 -> 800). Matches the UI.
     lo = str(int(min_price)) if min_price is not None else ""
     hi = str(int(max_price)) if max_price is not None else ""
     return f"{lo}-{hi}"
@@ -160,9 +248,9 @@ def _build_price_param(
 class FirecrawlDarazScraper(DarazScraper):
     """Daraz scraper implemented on top of :class:`FirecrawlAdapter`.
 
-    The adapter is injected (or lazily defaulted) so that tests can supply
-    a mock and so that future implementations can swap the transport
-    without touching this class's logic.
+    The adapter is injected (or lazily defaulted) so that tests can
+    supply a mock and so that future implementations can swap the
+    transport without touching this class's logic.
 
     Attributes:
         _adapter: The :class:`FirecrawlAdapter` used for HTTP fetches.
@@ -189,6 +277,10 @@ class FirecrawlDarazScraper(DarazScraper):
         page: int = 1,
     ) -> str:
         """Fetch the raw Markdown of a Daraz search-results page.
+
+        Search pages render eagerly and do not need the rendering
+        options that product pages use. This method deliberately passes
+        neither ``wait_for_ms`` nor ``only_main_content``.
 
         Args:
             query: Free-text search query.
@@ -225,25 +317,41 @@ class FirecrawlDarazScraper(DarazScraper):
     # ------------------------------------------------------------------ #
     # Product pages -- structured extraction path (ADR-001)
     # ------------------------------------------------------------------ #
-    async def fetch_product_payload(self, product_id: str) -> dict[str, Any]:
+    async def fetch_product_payload(
+        self,
+        product_id: str,
+        *,
+        max_age_ms: int | None = None,
+    ) -> dict[str, Any]:
         """Fetch a structured product payload from a Daraz product page.
 
-        The schema is derived from ``ProductDetails.model_json_schema()``
-        at call time so that any change to the Pydantic model automatically
-        propagates to the LLM prompt without a second edit.
+        The schema is derived from
+        ``ProductDetails.model_json_schema()`` at call time so that any
+        change to the Pydantic model automatically propagates to the LLM
+        prompt without a second edit.
+
+        Applies product-specific rendering options (``wait_for`` and
+        ``only_main_content=False``) -- see the module docstring for why.
 
         Args:
-            product_id: Daraz product identifier (e.g., ``"i1959941878"``).
+            product_id: Daraz product identifier (e.g. ``"i1959941878"``).
+            max_age_ms: Maximum age, in milliseconds, of a reused
+                Firecrawl cache entry. ``None`` (the default) lets
+                Firecrawl choose its own window per domain -- this is the
+                recommended setting for the MVP. Pass ``0`` to force a
+                live scrape when a stale read would cause a wrong
+                decision.
 
         Returns:
-            A dict shaped like the ``ProductDetails`` schema. Untrusted --
-            the caller must validate it.
+            A dict shaped like the ``ProductDetails`` schema. Untrusted
+            -- the caller must validate it.
 
         Raises:
             ScraperError: On any upstream failure.
         """
-        # Import here to avoid a module-level cycle: models do not import
-        # scrapers, but keeping this local makes the dependency explicit.
+        # Import here to avoid a module-level cycle: models do not
+        # import scrapers, but keeping this local makes the dependency
+        # explicit.
         from daraz_ai_shopping_assistant.models.product import ProductDetails
 
         url = build_product_url(product_id)
@@ -251,14 +359,49 @@ class FirecrawlDarazScraper(DarazScraper):
 
         logger.info(
             "DARAZ_PRODUCT_FETCH",
-            extra={"ctx": {"product_id": product_id, "url": url}},
+            extra={
+                "ctx": {
+                    "product_id": product_id,
+                    "url": url,
+                    "max_age_ms": max_age_ms,
+                    "wait_for_ms": _PRODUCT_WAIT_FOR_MS,
+                    "only_main_content": _PRODUCT_ONLY_MAIN_CONTENT,
+                }
+            },
         )
 
-        return await self._adapter.scrape_json(
+        payload = await self._adapter.scrape_json(
             url,
             schema=schema,
             prompt=_PRODUCT_EXTRACTION_PROMPT,
+            max_age_ms=max_age_ms,
+            wait_for_ms=_PRODUCT_WAIT_FOR_MS,
+            only_main_content=_PRODUCT_ONLY_MAIN_CONTENT,
         )
+
+        # Diagnostic: record the shape of what the LLM returned, without
+        # logging the actual product content. This is what tells us
+        # whether a "missing" section is genuinely absent from the
+        # payload or was returned as an empty value by the LLM.
+        logger.info(
+            "DARAZ_PRODUCT_PAYLOAD_SHAPE",
+            extra={
+                "ctx": {
+                    "product_id": product_id,
+                    "keys": sorted(payload.keys()),
+                    "description_len": len(payload.get("description") or ""),
+                    "specifications_count": len(
+                        payload.get("specifications") or {}
+                    ),
+                    "variants_count": len(payload.get("variants") or []),
+                    "reviews_count": len(payload.get("reviews") or []),
+                    "recommendations_count": len(
+                        payload.get("recommendations") or []
+                    ),
+                }
+            },
+        )
+        return payload
 
 __all__ = [
     "FirecrawlDarazScraper",

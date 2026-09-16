@@ -10,3 +10,10 @@ wheels/
 .venv
 
 .env
+.claude
+.mypy_cache
+.pytest_cache
+.ruff_cache
+.vscode
+.agents
+AGENT_CODEBASE_CONTEXT.md
