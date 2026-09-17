@@ -1,7 +1,7 @@
 """Chat orchestration service.
 
 Wraps the compiled LangGraph agent behind a service-layer interface so
-that the API route stays thin and the graph stays testable.
+that the API routes stay thin and the graph stays testable.
 
 The service is the ONLY place that:
 
@@ -10,7 +10,7 @@ The service is the ONLY place that:
     - extracts the final reply from the graph output,
     - curates the structured ``recommended_products`` list,
     - shapes the response envelope for the API layer,
-    - exposes a streaming variant for Server-Sent Events clients.
+    - exposes streaming variants for SSE and voice clients.
 
 Error handling policy:
 
@@ -35,7 +35,7 @@ from uuid import uuid4
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 
 from daraz_ai_shopping_assistant.agents.graph import get_compiled_graph
-from daraz_ai_shopping_assistant.agents.state import AgentState
+from daraz_ai_shopping_assistant.agents.state import AgentState, ParsedIntent
 from daraz_ai_shopping_assistant.core.logging import get_logger
 from daraz_ai_shopping_assistant.schemas.chat import ChatResponse
 
@@ -93,6 +93,7 @@ class ChatService:
                     "message_length": len(message),
                     "conversation_id": resolved_id,
                     "streaming": False,
+                    "mode": "text",
                 }
             },
         )
@@ -102,6 +103,7 @@ class ChatService:
             "intent": None,
             "tool_result": None,
             "error": None,
+            "mode": "text",
         }
         config = _thread_config(resolved_id)
 
@@ -139,14 +141,14 @@ class ChatService:
         )
 
     # ------------------------------------------------------------------ #
-    # Streaming chat
+    # SSE streaming chat
     # ------------------------------------------------------------------ #
     async def chat_stream(
         self,
         message: str,
         conversation_id: str | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
-        """Stream a chat response token-by-token.
+        """Stream a chat response token-by-token over SSE.
 
         Yields event dicts suitable for JSON-serialising straight into an
         SSE frame. The consumer (``api/chat.py``) is responsible for the
@@ -181,6 +183,7 @@ class ChatService:
                     "message_length": len(message),
                     "conversation_id": resolved_id,
                     "streaming": True,
+                    "mode": "text",
                 }
             },
         )
@@ -190,6 +193,7 @@ class ChatService:
             "intent": None,
             "tool_result": None,
             "error": None,
+            "mode": "text",
         }
         config = _thread_config(resolved_id)
 
@@ -209,9 +213,6 @@ class ChatService:
             token_count += 1
             yield {"type": "token", "text": text}
 
-        # Fetch the final state from the checkpointer for the terminal
-        # event. The non-streaming node code already wrote everything we
-        # need (intent, tool_result, error) into the state.
         final_values: dict[str, Any] = {}
         try:
             snapshot = await graph.aget_state(config)
@@ -251,9 +252,173 @@ class ChatService:
             "error": error_value,
         }
 
+    # ------------------------------------------------------------------ #
+    # Voice streaming chat
+    # ------------------------------------------------------------------ #
+    async def chat_voice_stream(
+        self,
+        message: str,
+        conversation_id: str | None = None,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Stream a chat turn with voice-friendly lifecycle events.
+
+        Unlike :meth:`chat_stream`, this emits intermediate events so the
+        voice session can play a filler phrase the moment intent is
+        known, before the slow Firecrawl scrape completes.
+
+        Event shapes:
+
+            {"type": "intent_parsed", "conversation_id": "...",
+             "intent": "search", "query": "..." | None}
+                Emitted as soon as the intent node finishes. The voice
+                session uses this to play a pre-cached filler.
+
+            {"type": "tool_started", "tool": "search"}
+            {"type": "tool_done", "tool": "search"}
+                Fired when a tool node starts and finishes. Useful for
+                UI status indicators.
+
+            {"type": "token", "text": "..."}
+                One LLM token from the ``respond`` node. Voice-only;
+                never contains markdown because the voice prompt forbids
+                it.
+
+            {"type": "done", "conversation_id": "...", "intent": "...",
+             "recommended_products": [...], "error": null | "..."}
+                Terminal event.
+
+        Args:
+            message: The user's message (already transcribed).
+            conversation_id: Optional conversation identifier.
+
+        Yields:
+            Dicts, one per lifecycle event, ending with ``done``.
+        """
+        graph = self._graph if self._graph is not None else get_compiled_graph()
+        resolved_id = _resolve_conversation_id(conversation_id)
+
+        started_at = time.monotonic()
+        logger.info(
+            "VOICE_CHAT_STARTED",
+            extra={
+                "ctx": {
+                    "message_length": len(message),
+                    "conversation_id": resolved_id,
+                }
+            },
+        )
+
+        initial_state: AgentState = {
+            "messages": [HumanMessage(content=message)],
+            "intent": None,
+            "tool_result": None,
+            "error": None,
+            "mode": "voice",
+        }
+        config = _thread_config(resolved_id)
+
+        token_count = 0
+        intent_emitted = False
+
+        async for event in graph.astream_events(
+            initial_state, config=config, version="v2"
+        ):
+            kind = event.get("event")
+            node = (event.get("metadata") or {}).get("langgraph_node")
+
+            # Intent ready -> caller plays a filler immediately.
+            if kind == "on_chain_end" and node == "parse_intent":
+                if not intent_emitted:
+                    output = event.get("data", {}).get("output") or {}
+                    intent_obj = _coerce_parsed_intent(
+                        output
+                        if isinstance(output, ParsedIntent)
+                        else output.get("intent")
+                    )
+                    if intent_obj is not None:
+                        intent_emitted = True
+                        yield {
+                            "type": "intent_parsed",
+                            "conversation_id": resolved_id,
+                            "intent": intent_obj.intent.value,
+                            "query": intent_obj.query,
+                        }
+                continue
+
+            # Tool boundaries -> UI status indicators, second filler hooks.
+            if kind == "on_chain_start" and node in (
+                "search",
+                "get_product",
+                "get_recommendations",
+            ):
+                yield {"type": "tool_started", "tool": node}
+                continue
+            if kind == "on_chain_end" and node in (
+                "search",
+                "get_product",
+                "get_recommendations",
+            ):
+                yield {"type": "tool_done", "tool": node}
+                continue
+
+            # Respond tokens -> sentence chunker -> TTS.
+            if kind == "on_chat_model_stream" and node == "respond":
+                chunk = event.get("data", {}).get("chunk")
+                text = _chunk_text(chunk)
+                if text:
+                    token_count += 1
+                    yield {"type": "token", "text": text}
+                continue
+
+        final_values: dict[str, Any] = {}
+        try:
+            snapshot = await graph.aget_state(config)
+            final_values = dict(snapshot.values) if snapshot is not None else {}
+        except Exception:
+            logger.exception(
+                "VOICE_CHAT_STATE_LOOKUP_FAILED",
+                extra={"ctx": {"conversation_id": resolved_id}},
+            )
+
+        intent_obj = _coerce_parsed_intent(final_values.get("intent"))
+        tool_result = final_values.get("tool_result")
+        error_value = final_values.get("error")
+        recommended = _curate_recommended_products(intent_obj, tool_result)
+
+        duration_ms = int((time.monotonic() - started_at) * 1000)
+        logger.info(
+            "VOICE_CHAT_COMPLETED",
+            extra={
+                "ctx": {
+                    "conversation_id": resolved_id,
+                    "intent": intent_obj.intent.value if intent_obj else None,
+                    "recommended_count": len(recommended),
+                    "has_error": error_value is not None,
+                    "token_count": token_count,
+                    "duration_ms": duration_ms,
+                }
+            },
+        )
+
+        yield {
+            "type": "done",
+            "conversation_id": resolved_id,
+            "intent": intent_obj.intent.value if intent_obj else None,
+            "recommended_products": recommended,
+            "error": error_value,
+        }
+
 # ---------------------------------------------------------------------- #
 # Helpers
 # ---------------------------------------------------------------------- #
+def _coerce_parsed_intent(value: Any) -> ParsedIntent | None:
+    """Convert a checkpoint or event value into a parsed intent model."""
+    if value is None:
+        return None
+    if isinstance(value, ParsedIntent):
+        return value
+    return ParsedIntent.model_validate(value)
+
 def _resolve_conversation_id(conversation_id: str | None) -> str:
     """Return a usable conversation identifier.
 

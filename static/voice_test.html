@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8">
+  <title>Daraz Voice -- manual test</title>
+  <style>
+    body {
+      font-family: system-ui, sans-serif;
+      max-width: 720px;
+      margin: 2rem auto;
+      padding: 0 1rem;
+    }
+
+    button {
+      padding: 0.6rem 1.2rem;
+      font-size: 1rem;
+      margin-right: 0.5rem;
+    }
+
+    #log {
+      margin-top: 1rem;
+      background: #f4f4f4;
+      padding: 1rem;
+      white-space: pre-wrap;
+      font-family: ui-monospace, monospace;
+      font-size: 0.85rem;
+      border-radius: 6px;
+      max-height: 30rem;
+      overflow: auto;
+    }
+
+    #transcript {
+      margin-top: 1rem;
+      font-size: 1.1rem;
+      min-height: 2rem;
+    }
+
+    #reply {
+      margin-top: 0.5rem;
+      font-size: 1rem;
+      color: #333;
+    }
+
+    #products {
+      margin-top: 1rem;
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+      gap: 0.75rem;
+    }
+
+    .card {
+      border: 1px solid #ddd;
+      border-radius: 8px;
+      padding: 0.75rem;
+      font-size: 0.85rem;
+    }
+
+    .card img {
+      width: 100%;
+      height: 120px;
+      object-fit: contain;
+    }
+
+    .card a {
+      color: #4d6bfe;
+      text-decoration: none;
+    }
+
+    .card .price {
+      font-weight: bold;
+      margin-top: 0.25rem;
+    }
+  </style>
+</head>
+
+<body>
+  <h1>Daraz Voice -- manual test</h1>
+  <p>Speak into the microphone. The assistant will transcribe, search, and speak the reply.</p>
+
+  <button id="start">Start session</button>
+  <button id="stop" disabled>Stop</button>
+
+  <div id="transcript">(transcript appear here)</div>
+  <div id="reply"></div>
+  <div id="products"></div>
+  <div id="log"></div>
+
+  <script>
+    // ----------------------------------------------------------------------
+    // Config -- must match the server's config for sample rates.
+    // ----------------------------------------------------------------------
+    const STT_SAMPLE_RATE = 16000;   // browser -> server (PCM16 mono)
+    const TTS_SAMPLE_RATE = 24000;   // server -> browser (PCM16 mono)
+    const WS_URL = `ws://${location.hostname}:8000/api/v1/voice/ws`;
+
+    // ----------------------------------------------------------------------
+    // State
+    // ----------------------------------------------------------------------
+    let ws = null;
+    let micCtx = null;
+    let outCtx = null;
+    let micStream = null;
+    let sourceNode = null;
+    let workletNode = null;
+    let nextPlayTime = 0;
+    let playbackSources = [];
+
+    // ----------------------------------------------------------------------
+    // AudioWorklet -- does the float32 -> int16 conversion inline.
+    // ----------------------------------------------------------------------
+    const WORKLET_CODE = `
+class PCM16Sender extends AudioWorkletProcessor {
+  process(inputs) {
+    const ch = inputs[0]?.[0];
+    if (!ch) return true;
+    const i16 = new Int16Array(ch.length);
+    for (let i = 0; i < ch.length; i++) {
+      const s = Math.max(-1, Math.min(1, ch[i]));
+      i16[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+    }
+    this.port.postMessage(i16.buffer, [i16.buffer]);
+    return true;
+  }
+}
+registerProcessor('pcm16-sender', PCM16Sender);
+`;
+
+    // ----------------------------------------------------------------------
+    // UI helpers
+    // ----------------------------------------------------------------------
+    function log(msg) {
+      const el = document.getElementById('log');
+      el.textContent += msg + '\n';
+      el.scrollTop = el.scrollHeight;
+    }
+
+    function renderProducts(products) {
+      const el = document.getElementById('products');
+      el.innerHTML = '';
+      for (const p of products || []) {
+        const card = document.createElement('div');
+        card.className = 'card';
+        const title = p.title || '';
+        const url = p.url || '#';
+        const price = p.price != null ? `Rs. ${p.price.toLocaleString()}` : '';
+        card.innerHTML = `
+      ${p.image ? `<img src="${p.image}" alt="">` : ''}
+      <a href="${url}" target="_blank" rel="noopener">${title.slice(0, 80)}</a>
+      <div class="price">${price}</div>
+    `;
+        el.appendChild(card);
+      }
+    }
+
+    // ----------------------------------------------------------------------
+    // Audio playback queue
+    // ----------------------------------------------------------------------
+    function queueAudio(int16Bytes) {
+      if (!outCtx) return;
+      const samples = new Int16Array(int16Bytes);
+      const floats = new Float32Array(samples.length);
+      for (let i = 0; i < samples.length; i++) floats[i] = samples[i] / 0x8000;
+
+      const buf = outCtx.createBuffer(1, floats.length, TTS_SAMPLE_RATE);
+      buf.copyToChannel(floats, 0);
+      const src = outCtx.createBufferSource();
+      src.buffer = buf;
+      src.connect(outCtx.destination);
+
+      const start = Math.max(outCtx.currentTime, nextPlayTime);
+      src.start(start);
+      nextPlayTime = start + buf.duration;
+      playbackSources.push(src);
+      src.onended = () => {
+        playbackSources = playbackSources.filter((s) => s !== src);
+      };
+    }
+
+    function stopPlayback() {
+      for (const s of playbackSources) {
+        try { s.stop(); } catch (_) { }
+      }
+      playbackSources = [];
+      nextPlayTime = outCtx ? outCtx.currentTime : 0;
+    }
+
+    // ----------------------------------------------------------------------
+    // Session
+    // ----------------------------------------------------------------------
+    async function startSession() {
+      document.getElementById('start').disabled = true;
+      document.getElementById('stop').disabled = false;
+
+      ws = new WebSocket(WS_URL);
+      ws.binaryType = 'arraybuffer';
+
+      ws.onopen = async () => {
+        log('[ws] open');
+        await startMic();
+      };
+
+      ws.onmessage = (e) => {
+        if (typeof e.data === 'string') {
+          handleJson(JSON.parse(e.data));
+        } else {
+          queueAudio(e.data);
+        }
+      };
+
+      ws.onclose = () => {
+        log('[ws] closed');
+        stopSession();
+      };
+
+      ws.onerror = (e) => log(`[ws] error: ${e.message || 'unknown'}`);
+    }
+
+    function handleJson(msg) {
+      log(`[json] ${JSON.stringify(msg).slice(0, 200)}`);
+      if (msg.type === 'transcript_interim') {
+        document.getElementById('transcript').textContent = msg.text + ' ...';
+      } else if (msg.type === 'transcript_final') {
+        document.getElementById('transcript').textContent = msg.text;
+      } else if (msg.type === 'reply_chunk') {
+        document.getElementById('reply').textContent += msg.text;
+      } else if (msg.type === 'intent') {
+        document.getElementById('reply').textContent = '';
+      } else if (msg.type === 'done') {
+        renderProducts(msg.recommended_products || []);
+      } else if (msg.type === 'stop_playback') {
+        stopPlayback();
+      } else if (msg.type === 'error') {
+        log(`[error] ${msg.message}`);
+      }
+    }
+
+    async function startMic() {
+      micStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      });
+      micCtx = new AudioContext({ sampleRate: STT_SAMPLE_RATE });
+      await micCtx.audioWorklet.addModule(URL.createObjectURL(
+        new Blob([WORKLET_CODE], { type: 'application/javascript' })
+      ));
+      sourceNode = micCtx.createMediaStreamSource(micStream);
+      workletNode = new AudioWorkletNode(micCtx, 'pcm16-sender');
+      workletNode.port.onmessage = (e) => {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(e.data);
+        }
+      };
+      sourceNode.connect(workletNode);
+      // Do NOT connect worklet to destination -- we don't want mic feedback.
+
+      outCtx = new AudioContext({ sampleRate: TTS_SAMPLE_RATE });
+      nextPlayTime = outCtx.currentTime;
+      log('[mic] streaming');
+    }
+
+    function stopSession() {
+      document.getElementById('start').disabled = false;
+      document.getElementById('stop').disabled = true;
+
+      if (ws) { try { ws.close(); } catch (_) { } ws = null; }
+      if (workletNode) { try { workletNode.disconnect(); } catch (_) { } workletNode = null; }
+      if (sourceNode) { try { sourceNode.disconnect(); } catch (_) { } sourceNode = null; }
+      if (micStream) { micStream.getTracks().forEach((t) => t.stop()); micStream = null; }
+      if (micCtx) { try { micCtx.close(); } catch (_) { } micCtx = null; }
+      if (outCtx) { try { outCtx.close(); } catch (_) { } outCtx = null; }
+      stopPlayback();
+      log('[mic] stopped');
+    }
+
+    document.getElementById('start').onclick = () => startSession().catch((e) => log('[error] ' + e.message));
+    document.getElementById('stop').onclick = () => stopSession();
+  </script>
+</body>
+
+</html>

@@ -24,12 +24,15 @@ from langgraph.checkpoint.memory import MemorySaver
 from daraz_ai_shopping_assistant import __version__
 from daraz_ai_shopping_assistant.agents.graph import warm_compiled_graph
 from daraz_ai_shopping_assistant.api import api_router
-from daraz_ai_shopping_assistant.api.exception_handlers import register_exception_handlers
+from daraz_ai_shopping_assistant.api.exception_handlers import (
+    register_exception_handlers,
+)
 from daraz_ai_shopping_assistant.core.config import settings
 from daraz_ai_shopping_assistant.core.logging import configure_logging, get_logger
 from daraz_ai_shopping_assistant.services.product_service import get_product_service
 from daraz_ai_shopping_assistant.services.search_service import get_search_service
 from daraz_ai_shopping_assistant.storage.json_store import ScrapeStore
+from daraz_ai_shopping_assistant.voice.fillers import get_filler_cache
 
 logger = get_logger(__name__)
 
@@ -39,7 +42,8 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None]:
 
     Runs once at startup and once at shutdown. Configures logging,
     initialises the scrape store, wires the process-wide service
-    singletons, and prepares the conversation checkpointer.
+    singletons, prepares the conversation checkpointer, and (optionally)
+    pre-synthesizes the voice filler phrases.
 
     Args:
         app: The FastAPI application.
@@ -72,6 +76,15 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None]:
     checkpointer = MemorySaver()
     app.state.checkpointer = checkpointer
     warm_compiled_graph(checkpointer=checkpointer)
+
+    # Optionally pre-synthesize the voice filler phrases. Costs a few
+    # ElevenLabs characters when enabled. Failures here never block
+    # startup -- the voice session degrades to no filler.
+    if settings.voice_prewarm_fillers:
+        try:
+            await get_filler_cache().warm()
+        except Exception:
+            logger.exception("VOICE_FILLER_PREWARM_FAILED")
 
     try:
         yield

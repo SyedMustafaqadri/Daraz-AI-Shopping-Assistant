@@ -10,6 +10,11 @@ field types are used:
 
 The state is intentionally small and JSON-serialisable so that
 checkpointing can be added later without reshaping the graph.
+
+The ``mode`` field selects which response prompt the ``respond`` node
+uses. ``"text"`` is the default (markdown bullets, prices as
+``Rs. 1,234``, product URLs). ``"voice"`` produces plain speech suitable
+for text-to-speech.
 """
 
 from __future__ import annotations
@@ -78,11 +83,14 @@ class AgentState(TypedDict):
         intent: The parsed intent from the most recent LLM classification.
         tool_result: Raw dict returned by the executed tool, if any.
         error: Human-readable error message, or ``None`` on success.
+        mode: ``"text"`` for chat replies, ``"voice"`` for spoken replies.
+            When absent, the graph treats the turn as text.
     """
 
     messages: Annotated[list[AnyMessage], add_messages]
     intent: ParsedIntent | None
     tool_result: dict[str, Any] | None
     error: str | None
+    mode: str
 
 __all__ = ["AgentState", "IntentType", "ParsedIntent"]

@@ -8,6 +8,7 @@ surfaces errors.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -157,6 +158,49 @@ async def test_chat_uses_fallback_when_no_ai_message() -> None:
 
     assert response.reply
     assert "could not" in response.reply.lower() or "try again" in response.reply.lower()
+
+@pytest.mark.asyncio()
+async def test_chat_voice_stream_normalizes_model_and_mapping_intents() -> None:
+    """Voice streaming accepts both LangGraph intent serialization shapes."""
+    intent = ParsedIntent(intent=IntentType.SEARCH, query="mouse")
+
+    async def events() -> Any:
+        yield {
+            "event": "on_chain_end",
+            "metadata": {"langgraph_node": "parse_intent"},
+            "data": {"output": intent},
+        }
+
+    graph = MagicMock()
+    graph.astream_events = MagicMock(return_value=events())
+    graph.aget_state = AsyncMock(
+        return_value=SimpleNamespace(
+            values={
+                "intent": {
+                    "intent": "search",
+                    "query": "mouse",
+                    "product_id": None,
+                    "min_price": None,
+                    "max_price": None,
+                    "page": 1,
+                },
+                "tool_result": None,
+                "error": None,
+            }
+        )
+    )
+    service = ChatService(graph=graph)
+
+    output = [event async for event in service.chat_voice_stream("mouse")]
+
+    assert output[0] == {
+        "type": "intent_parsed",
+        "conversation_id": output[0]["conversation_id"],
+        "intent": "search",
+        "query": "mouse",
+    }
+    assert output[-1]["type"] == "done"
+    assert output[-1]["intent"] == "search"
 
 def test_extract_reply_handles_string_content() -> None:
     """_extract_reply returns the string content of the last AIMessage."""

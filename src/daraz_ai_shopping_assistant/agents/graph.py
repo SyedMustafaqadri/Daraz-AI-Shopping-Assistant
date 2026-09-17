@@ -21,6 +21,16 @@ intent, and a JSON dump of the tool result -- all of which are already
 validated structures. It cannot invent product data because the data comes
 from the tools, and the response node is instructed to work only from that.
 
+Response modes:
+
+    ``respond`` selects between two system prompts based on
+    ``state["mode"]``:
+
+    - ``"text"`` (default): markdown bullets, clickable product URLs,
+      prices as ``Rs. 1,234``.
+    - ``"voice"``: plain conversational speech for text-to-speech. No
+      markdown, no URLs, prices as words.
+
 Conversation memory:
 
     When a checkpointer is passed to :func:`build_graph`, the compiled
@@ -113,6 +123,25 @@ _RESPONSE_SYSTEM_PROMPT: str = (
     "wrong in plain language.\n"
     "- Prices are in PKR. Format them as 'Rs. 1,234'.\n"
     "- Keep the reply under 200 words.\n"
+)
+
+_RESPONSE_SYSTEM_PROMPT_VOICE: str = (
+    "You are a voice shopping assistant for Daraz.pk. Your reply will be "
+    "SPOKEN ALOUD to the user. Write plain conversational speech.\n"
+    "\n"
+    "Rules:\n"
+    "- No markdown, no bullets, no numbered lists, no links, no URLs -- "
+    "never.\n"
+    "- Say prices as words: 'twelve hundred rupees' or 'one thousand, "
+    "two hundred rupees'. Never 'Rs.' and never 'PKR'.\n"
+    "- Mention at most three products. For each, say the short title "
+    "followed by the price. Do not read model numbers or SKUs.\n"
+    "- Keep the whole reply under sixty words.\n"
+    "- End with a brief natural follow-up question when it fits, such as "
+    "'Want me to show you more?'\n"
+    "- If the tool returned an error, apologise in one short sentence and "
+    "suggest trying again.\n"
+    "- Never invent data. If a field is missing, simply omit it.\n"
 )
 
 #: Maximum number of characters of a tool result to include in the
@@ -217,6 +246,20 @@ def _trim_for_llm(messages: Sequence[BaseMessage]) -> list[BaseMessage]:
     )
     return list(trimmed)
 
+def _select_response_prompt(mode: str) -> str:
+    """Return the system prompt for the given response mode.
+
+    Args:
+        mode: ``"text"`` or ``"voice"``. Anything else is treated as
+            ``"text"``.
+
+    Returns:
+        The system prompt string.
+    """
+    if mode == "voice":
+        return _RESPONSE_SYSTEM_PROMPT_VOICE
+    return _RESPONSE_SYSTEM_PROMPT
+
 # ---------------------------------------------------------------------- #
 # Graph construction
 # ---------------------------------------------------------------------- #
@@ -320,6 +363,7 @@ def build_graph(
         intent = state.get("intent")
         tool_result = state.get("tool_result")
         error = state.get("error")
+        mode = state.get("mode", "text") or "text"
 
         context_parts: list[str] = []
         if intent is not None:
@@ -341,7 +385,7 @@ def build_graph(
         trimmed = _trim_for_llm(state["messages"])
 
         prompt = [
-            SystemMessage(content=_RESPONSE_SYSTEM_PROMPT),
+            SystemMessage(content=_select_response_prompt(mode)),
             *trimmed,
             HumanMessage(
                 content=(
@@ -356,16 +400,15 @@ def build_graph(
             response = await resolved_llm.ainvoke(prompt)
         except Exception:
             logger.exception("AGENT_RESPONSE_FAILED")
-            return {
-                "messages": [
-                    AIMessage(
-                        content=(
-                            "Sorry, I could not generate a response right "
-                            "now. Please try again in a moment."
-                        )
-                    )
-                ]
-            }
+            fallback = (
+                "Sorry, something went wrong. Please try again."
+                if mode == "voice"
+                else (
+                    "Sorry, I could not generate a response right now. "
+                    "Please try again in a moment."
+                )
+            )
+            return {"messages": [AIMessage(content=fallback)]}
         return {"messages": [response]}
 
     # ------------------------------------------------------------------ #

@@ -103,10 +103,6 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------ #
     # LLM (chat layer)
     # ------------------------------------------------------------------ #
-    # `google_api_key` is optional at import time because the deterministic
-    # endpoints (search, product, recommendations) do not need it. It is
-    # validated lazily by the chat service, which raises a clear error when
-    # the endpoint is called without a configured key.
     google_api_key: str = Field(
         default="",
         description="Google API key for Gemini. Loaded from GOOGLE_API_KEY.",
@@ -180,6 +176,69 @@ class Settings(BaseSettings):
         default=24 * 3600,
         ge=1,
         description="TTL for persisted product-detail payloads, in seconds.",
+    )
+
+    # ------------------------------------------------------------------ #
+    # Voice -- Deepgram STT
+    # ------------------------------------------------------------------ #
+    # Both voice keys are optional at import time; the voice WebSocket
+    # endpoint validates them at connection time so the rest of the app
+    # (search, product, chat) works without them.
+    deepgram_api_key: str = Field(
+        default="",
+        description="Deepgram API key. Required for the voice endpoint.",
+    )
+    deepgram_model: str = Field(
+        default="nova-3",
+        description="Deepgram STT model identifier.",
+    )
+    deepgram_language: str = Field(
+        default="multi",
+        description=(
+            "Deepgram language hint. 'multi' handles English/Roman-Urdu "
+            "code-switching; use 'en' if you observe misdetections."
+        ),
+    )
+    stt_sample_rate: int = Field(
+        default=16000,
+        ge=8000,
+        le=48000,
+        description="Sample rate the browser must send audio at, in Hz.",
+    )
+
+    # ------------------------------------------------------------------ #
+    # Voice -- ElevenLabs TTS
+    # ------------------------------------------------------------------ #
+    elevenlabs_api_key: str = Field(
+        default="",
+        description="ElevenLabs API key. Required for the voice endpoint.",
+    )
+    elevenlabs_voice_id: str = Field(
+        default="21m00Tcm4TlvDq8ikWAM",
+        description=(
+            "ElevenLabs voice identifier. The default is the premade "
+            "'Rachel' voice -- clean and neutral for shopping replies."
+        ),
+    )
+    elevenlabs_model_id: str = Field(
+        default="eleven_flash_v2_5",
+        description=(
+            "ElevenLabs model identifier. 'eleven_flash_v2_5' trades a "
+            "little prosody quality for sub-100 ms first-byte latency."
+        ),
+    )
+    tts_sample_rate: int = Field(
+        default=24000,
+        ge=8000,
+        le=48000,
+        description="Sample rate ElevenLabs returns audio at, in Hz.",
+    )
+    voice_prewarm_fillers: bool = Field(
+        default=False,
+        description=(
+            "Pre-synthesize the latency-masking filler phrases at "
+            "startup. Costs a few ElevenLabs characters per boot."
+        ),
     )
 
     # ------------------------------------------------------------------ #

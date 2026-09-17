@@ -5,7 +5,7 @@ Every exception raised by application code must derive from
 exception. This lets API-level exception handlers map failures to HTTP
 status codes without inspecting exception messages.
 
-HTTP mapping (see ``Specification.md`` §29):
+HTTP mapping (see ``Specification.md`` Section 29):
 
     ===========================  =====
     Exception                    HTTP
@@ -16,6 +16,7 @@ HTTP mapping (see ``Specification.md`` §29):
     ScraperError                 502
     ScraperTimeoutError          504
     ParseError                   502
+    VoiceError                   500 (used only by the WebSocket endpoint)
     DarazScraperError            500
     ===========================  =====
 """
@@ -53,7 +54,6 @@ class DarazScraperError(Exception):
         parts = ", ".join(f"{k}={v!r}" for k, v in self.context.items())
         return f"{self.message} ({parts})"
 
-
 # ---------------------------------------------------------------------- #
 # Request / validation errors
 # ---------------------------------------------------------------------- #
@@ -65,7 +65,6 @@ class InvalidRequestError(DarazScraperError):
 
     http_status = 400
 
-
 # ---------------------------------------------------------------------- #
 # Not-found errors
 # ---------------------------------------------------------------------- #
@@ -76,7 +75,6 @@ class ProductNotFoundError(DarazScraperError):
     """
 
     http_status = 404
-
 
 # ---------------------------------------------------------------------- #
 # Upstream / scraping errors
@@ -118,7 +116,6 @@ class ScraperError(DarazScraperError):
         self.url = url
         self.upstream_status = upstream_status
 
-
 class ScraperTimeoutError(ScraperError):
     """Raised when Firecrawl or Daraz does not respond within the timeout.
 
@@ -127,7 +124,6 @@ class ScraperTimeoutError(ScraperError):
 
     http_status = 504
 
-
 class UpstreamRateLimitError(ScraperError):
     """Raised when Firecrawl or Daraz rate-limits the request.
 
@@ -135,7 +131,6 @@ class UpstreamRateLimitError(ScraperError):
     """
 
     http_status = 429
-
 
 # ---------------------------------------------------------------------- #
 # Parsing errors
@@ -172,6 +167,18 @@ class ParseError(DarazScraperError):
         super().__init__(message, context=merged)
         self.source = source
 
+# ---------------------------------------------------------------------- #
+# Voice errors
+# ---------------------------------------------------------------------- #
+class VoiceError(DarazScraperError):
+    """Raised when the voice pipeline fails.
+
+    The WebSocket endpoint does not use HTTP status codes; this class
+    exists for consistency with the rest of the exception hierarchy and
+    for use by the voice adapters when a vendor returns an error.
+    """
+
+    http_status = 500
 
 __all__ = [
     "DarazScraperError",
@@ -181,4 +188,5 @@ __all__ = [
     "ScraperError",
     "ScraperTimeoutError",
     "UpstreamRateLimitError",
+    "VoiceError",
 ]
