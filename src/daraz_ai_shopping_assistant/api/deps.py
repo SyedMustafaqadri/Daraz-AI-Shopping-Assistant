@@ -11,6 +11,10 @@ Rules:
       should be deferred to the service's own laziness.
     - The returned object is what the route handler receives as its
       parameter.
+
+The process-wide service singletons are warmed in ``main._lifespan`` so
+that the scrape store and conversation checkpointer are already bound by
+the time the first request arrives. These providers simply return them.
 """
 
 from __future__ import annotations

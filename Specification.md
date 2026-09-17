@@ -1,35 +1,46 @@
-# Daraz AI Shopping Assistant — Backend Specification
+# Daraz AI Shopping Assistant -- Backend Specification
 
 ## 1. Project Overview
 
-Build a backend service for an AI-powered shopping assistant that searches products from **Daraz.pk**, extracts product information using **Firecrawl**, structures and validates the data, and exposes clean APIs for a future chatbot/frontend.
+Build a backend service for an AI-powered shopping assistant that searches
+products from **Daraz.pk**, extracts product information using **Firecrawl**,
+structures and validates the data, and exposes clean APIs for a future
+chatbot/frontend.
 
-The initial system will **not implement its own recommendation algorithm**.
+The system does **not** implement its own recommendation algorithm.
 
-When available on Daraz product pages, the system will extract **Daraz's own recommended/similar products** and return them through the backend.
+When available on Daraz product pages, the backend extracts **Daraz's own
+recommended/similar products** and returns them.
 
-The backend will initially be developed independently from the frontend.
+The backend is developed independently from any frontend.
+
+**Status:** Phases 1-9 complete. All endpoints (including streaming and
+conversation memory) working end-to-end against live Daraz. Code pushed to
+GitHub.
 
 ---
 
 # 2. Primary Goals
 
-The MVP backend must be able to:
+The MVP backend is able to:
 
 1. Search Daraz products using a natural or structured search query.
 2. Scrape Daraz search-result pages using Firecrawl.
-3. Convert scraped Markdown/content into validated structured product data.
+3. Convert scraped Markdown into validated structured product data.
 4. Retrieve detailed information for an individual product.
 5. Extract Daraz's recommended/similar products from the product page.
 6. Expose all of the above through FastAPI.
 7. Provide clean, predictable JSON responses suitable for a future Next.js frontend.
-8. Support an AI/agent layer later without changing the underlying scraping services.
+8. Support a conversational AI layer with memory and streaming on top of
+   the deterministic services.
+9. Persist successful scrape payloads to a local JSON file so repeat
+   requests do not burn Firecrawl credits.
 
 ---
 
 # 3. Non-Goals for MVP
 
-The following are intentionally excluded from the first version:
+Intentionally excluded from the first version:
 
 - Custom product recommendation algorithms.
 - Vector database / embeddings.
@@ -44,6 +55,9 @@ The following are intentionally excluded from the first version:
 - Full review sentiment analysis.
 - Multi-marketplace search.
 - Frontend implementation.
+- Database persistence (the local JSON scrape store is a persistence layer
+  for scrape payloads and is explicitly in scope; it is not a database
+  and does not cross the "database persistence" line).
 
 These may be added later.
 
@@ -63,27 +77,32 @@ These may be added later.
              +-------------+-------------+
              |                           |
              v                           v
-       Daraz Search Service       Product Service
+       Search Service              Product Service
              |                           |
              +-------------+-------------+
                            |
-                           v
-                    DarazScraper
-                           |
-                           v
-                       Firecrawl
-                           |
-                           v
-                        Daraz.pk
+             +-------------+-------------+
+             |                           |
+             v                           v
+       ScrapeStore (JSON)           DarazScraper
+       (read/write from                 |
+        services only)                  v
+                                   Firecrawl
+                                        |
+                                        v
+                                     Daraz.pk
 ```
 
-Future AI layer:
+Chat layer (implemented, Phase 8-9):
 
 ```
                         Client
                           |
                           v
-                    POST /api/v1/chat
+                 POST /api/v1/chat
+                          |
+                          v
+                    ChatService  <---> MemorySaver (per conversation_id)
                           |
                           v
                        LangGraph
@@ -103,6 +122,10 @@ Future AI layer:
                        Firecrawl
 ```
 
+The graph's LLM is used **only** for intent parsing and reply phrasing. It
+never sees raw HTML, never extracts product fields, and never bypasses the
+service layer.
+
 ---
 
 # 5. Technology Stack
@@ -112,34 +135,31 @@ Future AI layer:
 - Python 3.14
 - FastAPI
 - Pydantic / Pydantic Settings
-- HTTP client as required by Firecrawl SDK/API
-- Firecrawl (both `scrape` for Markdown and `scrape` with a JSON schema for structured extraction — see ADR-001)
-- LangGraph (future AI layer)
+- httpx (transitive via Firecrawl SDK)
+- Firecrawl (`scrape` for Markdown, structured extraction for product pages)
+- LangGraph (chat layer, Phases 8-9)
 
 ## Scraping
 
-Primary:
+Primary: **Firecrawl**
 
-- Firecrawl
+Two extraction modes are used, split by page type (see Section 6.2 and
+Section 40 / ADR-001):
 
-Two extraction modes are used, split by page type (see §17 and §40 / ADR-001):
+- **Markdown mode** (`scrape(url) -> str`) for search-result pages. A
+deterministic parser handles the content afterwards.
+- **Structured extraction mode** (`scrape_json(url, schema=...) -> dict`)
+for product detail pages. Firecrawl's LLM reads the page and returns
+data matching a JSON Schema, which is then validated through Pydantic.
 
-- **Markdown mode** (`scrape(url) → str`) — for search-result pages. Deterministic parsing follows.
-- **Structured extraction mode** (`scrape_json(url, schema=...) → dict`) — for product detail pages. An LLM reads the page and returns data matching a JSON Schema, which is then validated through Pydantic.
+Potential fallback: **Playwright** -- installed but NOT used.
 
-Potential fallback:
+## Persistence
 
-- Playwright
-
-Playwright should not be introduced unless Firecrawl proves insufficient for a required workflow.
-
-## Database
-
-No database is required for the first scraping/API prototype.
-
-When persistence is introduced:
-
-- PostgreSQL
+- **Local JSON file** (`data/scrape_store.json`) for scrape payloads.
+- **In-memory LangGraph checkpointer** for conversation state.
+- No database for the MVP. PostgreSQL remains a future option, gated on
+explicit request and documented as an architectural decision at that time.
 
 ---
 
@@ -147,7 +167,7 @@ When persistence is introduced:
 
 ## 6.1 Separation of Responsibilities
 
-The system must separate:
+The system separates:
 
 ```
 AI reasoning
@@ -156,44 +176,41 @@ scraping
     !=
 data normalization
     !=
+local persistence
+    !=
 API layer
 ```
 
-The LLM should not directly control the complete scraping process.
-
-The LLM should mainly be responsible for:
+The LLM never controls the scraping process. It is responsible for:
 
 - understanding user intent,
 - extracting search requirements,
-- interpreting messy product information when necessary,
-- calling backend tools.
+- phrasing the final reply to the user.
 
-Firecrawl should be responsible for obtaining webpage content.
-
-Application code should be responsible for deterministic parsing, validation, normalization, and API responses.
+Firecrawl obtains webpage content. Application code performs deterministic
+parsing, validation, normalization, persistence, and API responses.
 
 ## 6.2 Extraction Strategy by Page Type
 
-Two distinct extraction pipelines exist, chosen by page type, not by convenience:
+Two distinct extraction pipelines exist, chosen by page type:
 
 | Page type ↕▾ | Firecrawl call ↕▾ | Extraction ↕▾ | Validated by ↕▾ |
 |---|---|---|---|
-| −Search results (`/catalog/?q=...`) | `scrape(url)` → Markdown | Deterministic parser (regex + string logic) | `Product.model_validate` |
-| Product detail (`/products/...`) | `scrape_json(url, schema=...)` → dict | Firecrawl structured extraction (LLM) | `ProductDetails.model_validate` |
-| Recommendations (embedded in product page) | `scrape_json(url, schema=...)` → dict | Same as product detail, nested schema | `Recommendation.model_validate` |
+| −Search results (`/catalog/?q=...`) | `scrape(url)` -> Markdown | Deterministic parser (regex + string logic) | `Product.model_validate` |
+| Product detail (`/products/...`) | `scrape_json(url, schema=...)` -> dict | Firecrawl structured extraction (LLM) | `ProductDetails.model_validate` |
+| Recommendations (embedded in product page) | Same as product detail | Same as product detail, nested schema | `Recommendation.model_validate` |
 ⚙
 
 **Rules:**
 
 - Never call `scrape_json` on a search result page.
-- Never call `scrape` (Markdown) on a product detail page and feed it to a regex parser.
-- Never skip Pydantic validation on the structured-extraction output — the schema is a suggestion, the model is the contract.
-
-See §17 (LLM Usage) and §40 (ADRs) for the full rationale.
+- Never call `scrape` (Markdown) on a product detail page and feed it to
+a regex parser.
+- Never skip Pydantic validation on structured-extraction output.
 
 ---
 
-# 7. Data Flow — Search
+# 7. Data Flow -- Search
 
 ```
 User Query
@@ -202,6 +219,12 @@ User Query
 Search Service
    |
    v
+Build cache key (query + filters + page)
+   |
+   v
+ScrapeStore.get(key)  -- hit? -> SearchResult.model_validate -> return
+   |
+   v  (miss)
 Build Daraz Search URL
    |
    v
@@ -217,10 +240,13 @@ Markdown / Scraped Content
 Parser
    |
    v
-Product objects
+Product objects (untrusted dicts)
    |
    v
 Pydantic Validation
+   |
+   v
+ScrapeStore.set(key, ttl=search_ttl)  -- only on success
    |
    v
 Search Response
@@ -229,11 +255,8 @@ Search Response
 Example:
 
 ```
-Input:
-Gaming Mouse
-
-Filter:
-Maximum price = Rs. 800
+Input:  Gaming Mouse
+Filter: Maximum price = Rs. 800
 
 Generated Daraz URL:
 https://www.daraz.pk/catalog/?q=Gaming%20Mouse&price=-800
@@ -241,19 +264,25 @@ https://www.daraz.pk/catalog/?q=Gaming%20Mouse&price=-800
 
 ---
 
-# 7.1 Data Flow — Product Detail
+# 7.1 Data Flow -- Product Detail
 
 ```
 Product ID
    |
    v
+Build cache key (product_id)
+   |
+   v
+ScrapeStore.get(key)  -- hit? -> ProductDetails.model_validate -> return
+   |
+   v  (miss)
 Build Daraz Product URL
    |
    v
 Firecrawl (structured extraction mode)
    |
    +--- JSON Schema from ProductDetails.model_json_schema()
-   +--- Prompt: "Extract product info; omit missing fields"
+   +--- Prompt: section-by-section extraction instructions
    |
    v
 Daraz Product Page
@@ -265,12 +294,22 @@ Structured JSON payload
 Pydantic Validation (ProductDetails.model_validate)
    |
    v
+ScrapeStore.set(key, ttl=product_ttl)
+   |
+   v
 Product Details Response
 ```
 
+Product-page rendering options applied during the scrape:
+
+- `wait_for_ms=5000` -- lets lazily-rendered sections appear.
+- `only_main_content=False` -- stops Firecrawl from classifying the
+sections we need as non-main and dropping them.
+
 Validation failure handling:
 
-- Log `PRODUCT_VALIDATION_FAILED` with the offending payload.
+- Log `PRODUCT_VALIDATION_FAILED` with the offending payload shape (never
+the raw content).
 - Raise `ParseError(source="product")` to the service layer.
 - Never surface the raw LLM payload to the API consumer.
 
@@ -278,7 +317,7 @@ Validation failure handling:
 
 # 8. Search Result Schema
 
-A search response must follow this general structure:
+A search response follows this structure:
 
 ```
 {
@@ -303,7 +342,7 @@ A search response must follow this general structure:
 
 # 9. Product Schema
 
-The core lightweight product object should contain:
+The lightweight product object:
 
 ```
 {
@@ -329,17 +368,17 @@ The core lightweight product object should contain:
 
 | Field ↕▾ | Type ↕▾ | Required ↕▾ | Notes ↕▾ |
 |---|---|---|---|
-| −`id` | string | Yes | Daraz product identifier |
-| −`title` | string | Yes | Product title |
+| −`id` | string | Yes | Daraz product identifier (e.g. `i1959941878`) |
+| `title` | string | Yes | Product title |
 | `url` | string | Yes | Original Daraz product URL |
 | `image` | string/null | No | Product image URL |
 | `price` | number | Yes | Numeric value only |
-| `currency` | string | Yes | Use `PKR` |
+| `currency` | string | Yes | Always `PKR` for Daraz.pk |
 | `original_price` | number/null | No | Original price if available |
-| `discount_percentage` | number/null | No | Numeric percentage |
+| `discount_percentage` | number/null | No | Numeric percentage (0-100) |
 | `coins_save` | number/null | No | Numeric PKR value |
 | `sold_count` | number/null | No | Number sold |
-| `rating` | number/null | No | Actual star rating |
+| `rating` | number/null | No | Star rating (0-5) |
 | `rating_count` | number/null | No | Number of ratings/reviews |
 | `location` | string/null | No | Seller/product location |
 ⚙
@@ -348,7 +387,7 @@ The core lightweight product object should contain:
 
 # 11. Data Type Rules
 
-Do not preserve presentation formatting in core numeric fields.
+Do not preserve presentation formatting in numeric fields.
 
 Bad:
 
@@ -371,90 +410,45 @@ Good:
 }
 ```
 
-The backend should normalize values before returning them.
-
-For structured-extraction output (product pages), the JSON Schema passed to Firecrawl should already declare numeric types for these fields. If the LLM still returns a formatted string, `ProductDetails.model_validate` will reject it (Pydantic does not coerce `"Rs. 579"` to `float`) — this is intentional: it forces the prompt to be tightened rather than silently corrupting data.
+The backend normalizes values before returning them.
 
 ---
 
 # 12. Missing Data Rules
 
-Missing information must be represented as:
+Missing information is `null`. Never allow the LLM to invent missing
+information.
 
-```
-null
-```
-
-Never allow the LLM to invent missing information.
-
-Example:
-
-```
-{
-  "rating": null,
-  "image": null
-}
-```
-
-is valid.
-
-The following is invalid:
-
-```
-{
-  "rating": 4.6
-}
-```
-
-when no rating was actually present in the scraped data.
-
-The structured-extraction prompt must instruct the model to **omit** rather than guess. Missing fields default to `None` / empty via the Pydantic model defaults.
+The structured-extraction prompt instructs the model to **omit** fields
+rather than guess. Missing fields default to `None` or empty via Pydantic
+model defaults.
 
 ---
 
 # 13. Search Product vs Detailed Product
 
-The system must distinguish between lightweight search results and full product details.
-
 ## Search Product
 
-Used for catalog/search results.
-
-Contains primarily:
+Used for catalog/search results. Contains:
 
 ```
-id
-title
-url
-image
-price
-discount
-sold
-rating
-rating_count
-location
+id, title, url, image, price, currency,
+original_price, discount_percentage, coins_save,
+sold_count, rating, rating_count, location
 ```
 
 ## Product Details
 
-Contains the search-product fields plus:
+Contains all search-product fields plus:
 
 ```
-description
-specifications
-seller
-shipping
-availability
-variants
-reviews
-recommendations
+description, specifications, seller, shipping,
+availability, variants, reviews, recommendations
 ```
 
 ---
 
 # 14. Detailed Product Schema
-
-Example:
 
 ```
 {
@@ -471,120 +465,57 @@ Example:
   "rating": null,
   "rating_count": 40,
   "location": "Punjab",
-
   "description": null,
-
   "specifications": {},
-
-  "seller": {
-    "name": null,
-    "rating": null,
-    "positive_rate": null
-  },
-
-  "shipping": {
-    "fee": null,
-    "free_shipping": null,
-    "estimated_delivery": null
-  },
-
+  "seller": { "name": null, "rating": null, "positive_rate": null },
+  "shipping": { "fee": null, "free_shipping": null, "estimated_delivery": null },
   "availability": null,
-
   "variants": [],
-
   "reviews": [],
-
   "recommendations": []
 }
 ```
 
-Fields should be populated only when the information is actually available.
+Fields are populated only when the information is available.
 
-**Extraction note:** `ProductDetails` is produced via Firecrawl structured extraction, not Markdown parsing. The JSON Schema passed to Firecrawl is derived from `ProductDetails.model_json_schema()` — this guarantees the LLM sees exactly the contract Pydantic will enforce. See §40 / ADR-001.
+**Extraction note:** `ProductDetails` is produced via Firecrawl structured
+extraction, not Markdown parsing. See Section 40 / ADR-001.
 
----
+## 14.1 Known Limitations of Product-Detail Extraction
 
-### 14.1 Known Limitations of Product-Detail Extraction
-
-The product-detail endpoint uses Firecrawl's LLM-driven structured
-extraction (ADR-001). Three sections are known to be unreliable on the
-current Daraz product-page layout and are documented here rather than
-chased indefinitely:
+Three sections are unreliable on the current Daraz product-page layout and
+are documented here rather than chased indefinitely:
 
 - **`specifications`** may return `{}` even when the "Specifications of"
-  heading is present in Firecrawl's Markdown snapshot. The section renders
-  as a table whose structure varies between products, and LLM extraction
-  is inconsistent. Treat an empty `specifications` object as "not
-  available" rather than "not rendered" — the two are indistinguishable
-  from the response alone.
-
+heading is present in Firecrawl's Markdown snapshot. Treat an empty
+`specifications` object as "not available" rather than "not rendered".
 - **`recommendations`** is always `[]` in the current implementation. The
-  recommendation carousel loads only after a scroll event, which the
-  scrape does not trigger. Extracting it requires a Firecrawl scroll
-  action, which adds cost and latency per request. Deferred to a future
-  iteration; see the "Recommendations" section in the project roadmap.
+recommendation carousel loads only after a scroll event, which the
+scrape does not trigger. Deferred.
+- **`rating`** on search-result products is always `null`. Daraz renders
+stars as images, which Markdown strips. `rating_count` is present and
+correct.
 
-- **`variants`** may occasionally return `[]` for a product that shows a
-  single variant chip. The extraction prompt now explicitly instructs the
-  model to include single-chip variants, but LLM output is
-  non-deterministic. Consumers should treat an empty `variants` list as
-  "not extracted" rather than "no variants exist".
+All other fields (`id`, `title`, `url`, `image`, `price`, `currency`,
+`original_price`, `discount_percentage`, `sold_count`, `rating_count`,
+`location`, `description`, `seller`, `shipping`, `availability`, `reviews`,
+`variants`) are extracted reliably on the product pages tested so far.
 
-All other fields — `id`, `title`, `url`, `image`, `price`, `currency`,
-`original_price`, `discount_percentage`, `sold_count`, `rating`,
-`rating_count`, `location`, `description`, `seller`, `shipping`,
-`availability`, `reviews` — are extracted reliably on the product pages
-tested so far. The service-layer `_normalise_product_id` helper repairs
-the one known LLM quirk (dropping the "i" prefix from `id`).
+The service-layer `_normalise_product_id` helper repairs one known LLM
+quirk: the model occasionally strips the `i` prefix from the `id` field.
 
 ---
 
 # 15. Recommendation Strategy
 
-The MVP will NOT build a custom recommendation engine.
+The MVP does NOT build a custom recommendation engine.
 
-Daraz already has its own recommendation system.
+Daraz already has its own recommendation system. The backend attempts to
+extract recommendations shown on the Daraz product page.
 
-The backend should attempt to extract recommendation products shown on the Daraz product page.
-
-Conceptually:
-
-```
-Product Page
-    |
-    +-- Product Information
-    |
-    +-- Seller
-    |
-    +-- Reviews
-    |
-    +-- Specifications
-    |
-    +-- Daraz Recommendations
-              |
-              v
-       Recommendation[]
-```
-
-The system should preserve the fact that these recommendations are sourced from Daraz.
-
-Recommendations are extracted as part of the **product detail structured extraction** — the `ProductDetails` JSON Schema includes a `recommendations: array` field. No separate Firecrawl call is made.
-
-Example:
-
-```
-{
-  "recommendations": [
-    {
-      "id": "...",
-      "title": "...",
-      "price": 799,
-      "url": "...",
-      "image": "..."
-    }
-  ]
-}
-```
+Recommendations are extracted as part of the product-detail structured
+extraction -- the `ProductDetails` schema includes a `recommendations:
+array` field. No separate Firecrawl call is made.
 
 ---
 
@@ -593,57 +524,23 @@ Example:
 If Daraz recommendations cannot be detected:
 
 ```
-{
-  "recommendations": []
-}
+{ "recommendations": [] }
 ```
 
 The backend must NOT generate fake recommendations.
-
-Future versions may add a custom recommendation engine as a fallback, but this is outside MVP scope.
 
 ---
 
 # 17. LLM Usage
 
-> **Amendment (2026-09-15, ADR-001):** Search-result pages use deterministic Markdown parsing only. Product detail pages use Firecrawl structured extraction (LLM + JSON Schema) validated through Pydantic. See §40 for the full rationale and constraints.
+> **Amendment (ADR-001):** Search-result pages use deterministic Markdown
+> parsing only. Product detail pages use Firecrawl structured extraction
+> (LLM + JSON Schema) validated through Pydantic.
 
-The LLM should NOT be responsible for blindly converting the entire webpage into JSON.
-
-This rule stands for **search-result pages** and any page whose layout is uniform enough for a regex parser. It is deliberately lifted for **product detail pages**, where irregular layout makes deterministic parsing fragile.
-
-Preferred approach (search):
-
-```
-Firecrawl Markdown
-        |
-        v
-Deterministic parsing
-        |
-        v
-Structured fields
-        |
-        v
-LLM only where semantic interpretation is necessary
-        |
-        v
-Pydantic validation
-```
-
-Preferred approach (product detail):
-
-```
-Firecrawl structured extraction
-        |
-        v
-JSON payload matching ProductDetails schema
-        |
-        v
-Pydantic validation (the model is the contract)
-        |
-        v
-Structured fields
-```
+The LLM is NOT responsible for blindly converting the entire webpage into
+JSON. This rule stands for search-result pages and any page whose layout is
+uniform enough for a regex parser. It is deliberately lifted for product
+detail pages.
 
 The LLM may be used for:
 
@@ -652,9 +549,10 @@ The LLM may be used for:
 - feature extraction,
 - category classification,
 - semantic interpretation,
-- **whole-page structured extraction on product detail pages only**.
+- whole-page structured extraction on product detail pages only,
+- intent classification and reply phrasing in the chat layer (Section 41).
 
-The LLM should not fabricate:
+The LLM must not fabricate:
 
 - prices,
 - product IDs,
@@ -667,7 +565,8 @@ The LLM should not fabricate:
 
 # 18. Future Search Query Schema
 
-Natural-language queries should eventually be transformed into a structured object such as:
+Natural-language queries are eventually transformed into a structured
+object:
 
 ```
 {
@@ -676,42 +575,34 @@ Natural-language queries should eventually be transformed into a structured obje
   "min_price": null,
   "max_price": 5000,
   "brand": null,
-  "features": [
-    "wireless",
-    "RGB"
-  ],
+  "features": ["wireless", "RGB"],
   "sort": null
 }
 ```
 
-This schema will be used later by the AI agent to construct Daraz searches.
+Currently the chat layer parses to a simpler `ParsedIntent` (Section 41).
+This richer schema is a future extension.
 
 ---
 
 # 19. Scraper Interface
 
-The scraping layer should expose a stable interface.
-
-Conceptually:
+The scraping layer exposes a stable interface:
 
 ```
 class DarazScraper:
-    def search_products(...)
-    def get_product(...)
-    def get_recommendations(...)
+    async def fetch_search_markdown(...) -> str
+    async def fetch_product_payload(...) -> dict[str, Any]
 ```
 
-The rest of the backend should depend on this interface rather than directly depending on Firecrawl.
-
-`DarazScraper.search_products` uses the **Markdown path** internally.
-
-`DarazScraper.get_product` and `DarazScraper.get_recommendations` use the **structured extraction path** internally.
+The rest of the backend depends on this interface, never directly on
+Firecrawl.
 
 ---
 
 # 20. Firecrawl Adapter
 
-Firecrawl should be hidden behind the scraper abstraction.
+Firecrawl is hidden behind the scraper abstraction:
 
 ```
 Application
@@ -722,160 +613,131 @@ DarazScraper
     v
 FirecrawlAdapter
     |
-    +--- scrape(url) -> str        (Markdown mode)
+    +--- scrape(url) -> str                       (Markdown mode)
     |
-    +--- scrape_json(url, schema) -> dict   (structured extraction)
+    +--- scrape_json(url, schema, prompt) -> dict (structured extraction)
     |
     v
 Firecrawl API
 ```
 
-The adapter exposes two methods:
+Both methods share identical retry semantics, exception classification, and
+structured logging (`FIRECRAWL_REQUEST`, `FIRECRAWL_RESPONSE`,
+`FIRECRAWL_RETRY`, each with a `mode` field of `"markdown"` or `"json"`).
 
-| Method | Returns | Used by |
-|---|---|---|
-| `scrape(url)` | `str` (Markdown) | Search result pages |
-| `scrape_json(url, schema=..., prompt=..., max_age_ms=...)` | `dict[str, Any]` | Product detail pages |
-
-Both share identical retry semantics, exception classification, and structured logging (`FIRECRAWL_REQUEST`, `FIRECRAWL_RESPONSE`, `FIRECRAWL_RETRY`, each carrying a `mode` field of `"markdown"` or `"json"`).
-
-This makes it possible to replace Firecrawl later.
-
-Potential future implementation:
+Current Firecrawl JSON format shape:
 
 ```
-DarazScraper
-   |
-   +-- FirecrawlAdapter
-   |
-   +-- PlaywrightAdapter
+formats=[{"type": "json", "prompt": "...", "schema": {...}}]
 ```
 
 ---
 
-# 21. Current Project Structure
+# 21. Project Structure
 
-The project uses a **`src/` layout** managed by `uv`. The package name is `daraz_ai_shopping_assistant`.
+The project uses a **`src/` layout** managed by `uv`. The package name is
+`daraz_ai_shopping_assistant`.
 
 ```
 daraz-ai-shopping-assistant/
-│
-├── src/
-│   └── daraz_ai_shopping_assistant/
-│       ├── __init__.py
-│       ├── core/
-│       ├── models/
-│       └── scrapers/
-│
-├── tests/
-│   ├── fixtures/
-│   └── unit/
-│
-├── scripts/
-│   └── generate_fixtures.py
-│
-├── docs/
-│   └── ARCHITECTURE-DECISIONS.md
-│
-├── .venv/                     # managed by uv (not committed)
-├── .gitignore
-├── .python-version            # pinned to Python 3.14
-├── pyproject.toml
-├── uv.lock
-├── README.md
-├── Specification.md
-└── structure.txt
+|
++-- src/
+|   +-- daraz_ai_shopping_assistant/
+|       +-- __init__.py
+|       +-- main.py                  # FastAPI app entry point
+|       |
+|       +-- api/
+|       |   +-- __init__.py          # api_router; mounts sub-routers
+|       |   +-- deps.py              # dependency providers
+|       |   +-- exception_handlers.py
+|       |   +-- search.py
+|       |   +-- products.py
+|       |   +-- chat.py              # /chat and /chat/stream
+|       |
+|       +-- models/
+|       |   +-- __init__.py
+|       |   +-- product.py
+|       |   +-- search.py
+|       |   +-- recommendation.py
+|       |
+|       +-- schemas/
+|       |   +-- __init__.py
+|       |   +-- product.py
+|       |   +-- search.py
+|       |   +-- chat.py
+|       |
+|       +-- services/
+|       |   +-- __init__.py          # re-exports search + product (NOT chat)
+|       |   +-- search_service.py
+|       |   +-- product_service.py
+|       |   +-- chat_service.py      # facade over the LangGraph agent
+|       |
+|       +-- scrapers/
+|       |   +-- __init__.py
+|       |   +-- base.py              # abstract DarazScraper
+|       |   +-- daraz.py             # FirecrawlDarazScraper, URL builders
+|       |   +-- firecrawl.py         # ONLY importer of `firecrawl`
+|       |
+|       +-- parsers/
+|       |   +-- __init__.py
+|       |   +-- search_parser.py     # pure function: Markdown -> dict
+|       |
+|       +-- agents/
+|       |   +-- __init__.py
+|       |   +-- state.py             # AgentState, ParsedIntent, IntentType
+|       |   +-- tools.py             # thin wrappers around services
+|       |   +-- graph.py             # StateGraph, build_graph, get_compiled_graph
+|       |
+|       +-- storage/
+|       |   +-- __init__.py
+|       |   +-- json_store.py        # ScrapeStore -- local JSON persistence
+|       |
+|       +-- core/
+|       |   +-- __init__.py
+|       |   +-- config.py
+|       |   +-- exceptions.py
+|       |   +-- logging.py
+|       |
+|       +-- utils/
+|           +-- __init__.py
+|           +-- datetime.py          # PKT timezone helpers
+|
++-- tests/
+|   +-- __init__.py
+|   +-- conftest.py
+|   +-- unit/
+|   +-- api/
+|   +-- integration/
+|   +-- fixtures/
+|
++-- scripts/
++-- docs/
++-- data/                             # gitignored; created at runtime
++-- .venv/                            # managed by uv (not committed)
++-- .gitignore
++-- .python-version
++-- pyproject.toml
++-- uv.lock
++-- README.md
++-- Specification.md
++-- AGENTS.md
++-- .env.example
 ```
 
-## 21.1 Target Structure (to be implemented)
+## 21.1 Notes on the Structure
 
-The following structure should be built inside `src/daraz_ai_shopping_assistant/`:
-
-```
-src/
-└── daraz_ai_shopping_assistant/
-    │
-    ├── __init__.py
-    ├── main.py                # FastAPI app entry point
-    │
-    ├── api/
-    │   ├── __init__.py
-    │   ├── search.py
-    │   ├── products.py
-    │   └── chat.py            # placeholder for future AI layer
-    │
-    ├── models/
-    │   ├── __init__.py
-    │   ├── product.py
-    │   ├── search.py
-    │   └── recommendation.py
-    │
-    ├── schemas/
-    │   ├── __init__.py
-    │   ├── product.py
-    │   ├── search.py
-    │   └── chat.py
-    │
-    ├── services/
-    │   ├── __init__.py
-    │   ├── search_service.py
-    │   ├── product_service.py
-    │   └── recommendation_service.py
-    │
-    ├── scrapers/
-    │   ├── __init__.py
-    │   ├── base.py
-    │   ├── daraz.py
-    │   └── firecrawl.py
-    │
-    ├── parsers/
-    │   ├── __init__.py
-    │   ├── search_parser.py
-    │   ├── product_parser.py        # validation-only; extraction is Firecrawl
-    │   └── recommendation_parser.py # validation-only; extraction is Firecrawl
-    │
-    ├── agents/                # empty until Phase 8
-    │   ├── __init__.py
-    │   ├── graph.py
-    │   ├── state.py
-    │   └── tools.py
-    │
-    ├── core/
-    │   ├── __init__.py
-    │   ├── config.py
-    │   ├── exceptions.py
-    │   └── logging.py
-    │
-    └── utils/
-        └── __init__.py
-```
-
-Tests live at the repository root:
-
-```
-tests/
-├── __init__.py
-├── unit/
-├── integration/
-├── api/
-└── fixtures/
-```
-
-## 21.2 Notes on the Structure
-
-- The `src/` layout is enforced by `uv` and `pyproject.toml`.
-- `app/` is **not** used — the package is `daraz_ai_shopping_assistant`, not `app`.
-- The AI/agent folder (`agents/`) remains empty until Phase 8 is explicitly activated.
-- `tests/` sits at the repository root, outside `src/`.
-- `core/config.py` loads settings from `.env` via `pydantic-settings`.
-- `docs/ARCHITECTURE-DECISIONS.md` records binding architectural decisions (see §40).
-- `product_parser.py` and `recommendation_parser.py` are **validators**, not regex parsers: their job is to take Firecrawl's structured JSON output and validate it through Pydantic (plus any small normalisation the LLM missed).
+- `src/` layout enforced by `uv` and `pyproject.toml`.
+- The package is `daraz_ai_shopping_assistant`. There is no `app/` folder.
+- `services/__init__.py` deliberately does NOT re-export `ChatService` to
+avoid a circular import.
+- `api/__init__.py` registers `search_router` BEFORE `products_router`.
+- `firecrawl.py` is the only module permitted to import `firecrawl`.
+- `storage/` is a leaf. It is called only by the service layer.
+- `core/config.py` loads settings from `.env` via pydantic-settings.
 
 ---
 
-# 22. API Endpoints
-
-## Search Products
+# 22. Search Products Endpoint
 
 ```
 GET /api/v1/products/search
@@ -884,174 +746,129 @@ GET /api/v1/products/search
 Parameters:
 
 ```
-q
-min_price
-max_price
-page
+q           (required, string, 1-200 chars)
+min_price   (optional, float, >= 0)
+max_price   (optional, float, >= 0)
+page        (optional, int, >= 1, <= 200, default 1)
 ```
 
-Example:
-
-```
-GET /api/v1/products/search?q=gaming%20mouse&max_price=800
-```
-
-Response:
-
-```
-{
-  "source": "Daraz.pk",
-  "search_query": "Gaming Mouse",
-  "filters": {
-    "min_price": null,
-    "max_price": 800
-  },
-  "total_items_found": 11084,
-  "scraped_at": "2026-09-15T10:49:06+05:00",
-  "products": [],
-  "pagination": {
-    "current_page": 1,
-    "total_pages": 102,
-    "items_per_page": 40
-  }
-}
-```
+Response shape: `SearchResult` (Section 8).
 
 ---
 
-# 23. Get Product
+# 23. Get Product Endpoint
 
 ```
 GET /api/v1/products/{product_id}
 ```
 
-The endpoint should return detailed product information.
+Path parameter `product_id` must match `^i\d+$`.
 
-Example:
-
-```
-GET /api/v1/products/i1959941878
-```
-
-This endpoint internally uses Firecrawl **structured extraction** with the `ProductDetails` JSON Schema. See §40 / ADR-001.
+Response shape: `ProductDetails` (Section 14).
 
 ---
 
-# 24. Get Recommendations
+# 24. Get Recommendations Endpoint
 
 ```
 GET /api/v1/products/{product_id}/recommendations
 ```
 
-Returns recommendations detected from Daraz's product page.
-
-Recommendations are a nested field of the product-detail structured extraction. The endpoint extracts the `recommendations` array from the `ProductDetails` payload — no additional Firecrawl call is made.
+Returns the `recommendations` array from the product-detail payload. No
+second Firecrawl call is made. Empty when the carousel is absent.
 
 ---
 
-# 25. Future Chat Endpoint
-
-Not required initially, but architecture should support:
+# 25. Chat Endpoint
 
 ```
 POST /api/v1/chat
 ```
 
-Example request:
+Request body:
 
 ```
 {
-  "message": "Find me a gaming mouse under Rs.
+  "message": "Find me a gaming mouse under Rs. 5000",
+  "conversation_id": "7c9e6679-7425-40de-944b-e07fc1f90ae7"
+}
 ```
 
-Future agent flow:
+`conversation_id` is optional. Omit it on the first turn; the server
+generates one and returns it in the response. Send it back on subsequent
+turns to continue the same conversation.
+
+Response body:
 
 ```
-User Message
-    |
-    v
-LangGraph
-    |
-    v
-Understand Intent
-    |
-    v
-Search Parameters
-    |
-    v
-search_
+{
+  "reply": "Here are some gaming mice under Rs. 5,000...",
+  "conversation_id": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+  "intent": "search",
+  "recommended_products": [
+    { "id": "i1959941878", "title": "...", "price": 579, "url": "..." },
+    { "id": "i201116087", "title": "...", "price": 997, "url": "..." }
+  ],
+  "data": { "products": [ ... ], ... },
+  "error": null
+}
 ```
+
+Response fields:
+
+| Field ↕▾ | Meaning ↕▾ |
+|---|---|
+| −`reply` | Assistant's natural-language reply (always present) |
+| −`conversation_id` | Echo for the next turn (always present) |
+| `intent` | `search`, `get_product`, `get_recommendations`, `small_talk` |
+| `recommended_products` | Structured list of products the assistant is recommending |
+| `data` | Raw tool result, shape depends on intent |
+| `error` | Non-null only when a tool failed |
+⚙
+
+Tools call services, never scrapers or Firecrawl directly. The graph
+absorbs `DarazScraperError` and reports it on the `error` field.
 
 ---
 
 # 26. Search Pagination
 
-Daraz may report a very large number of total products.
+Daraz may report a very large number of total products (e.g. 11,084
+products across 102 pages).
 
-Example:
-
-```
-11,084 products
-102 pages
-40 products/page
-```
-
-The backend must NOT scrape the entire catalog by default.
-
-MVP behavior:
-
-```
-Request page 1
-    |
-    v
-Extract available products
-    |
-    v
-Return results
-```
-
-Future versions may support multiple-page searching until enough suitable products have been found.
+The backend does NOT scrape the entire catalog by default.
 
 ---
 
 # 27. Product Deduplication
 
-Products retrieved from multiple search queries or pages may contain duplicates.
-
-The preferred initial deduplication key is:
-
-```
-Daraz product ID
-```
-
-For example:
-
-```
-i1959941878
-```
-
-If the product ID is available, it should be considered the canonical identifier.
+Products retrieved from multiple queries or pages may contain duplicates.
+The canonical deduplication key is the **Daraz product ID**.
 
 ---
 
 # 28. Search URL Builder
 
-Daraz-specific URL syntax should be isolated inside a dedicated component.
-
-Example:
+Daraz-specific URL syntax is isolated inside `scrapers/daraz.py`:
 
 ```
-User filter:
-max_price = 800
+def build_search_url(query, *, min_price=None, max_price=None, page=None) -> str
+def build_product_url(product_id) -> str
 ```
 
-The rest of the application should not need to know Daraz's URL syntax.
+Daraz price parameter syntax:
+
+```
+-800        # max only
+100-        # min only
+100-800     # both bounds
+```
 
 ---
 
 # 29. Error Handling
 
-The backend must handle:
+The backend handles:
 
 - Firecrawl API errors
 - Daraz page unavailable
@@ -1060,304 +877,237 @@ The backend must handle:
 - missing product data
 - invalid product URL
 - parser failure
-- **structured extraction returning malformed JSON**
-- **structured extraction returning data that fails Pydantic validation**
+- structured extraction returning malformed JSON
+- structured extraction returning data that fails Pydantic validation
 - rate limits
 - unexpected Daraz page changes
 
-API responses should use appropriate HTTP status codes.
-
-Example:
+HTTP status mapping:
 
 ```
-400 → invalid
+400 -> invalid request  (InvalidRequestError)
+404 -> product not found (ProductNotFoundError)
+429 -> rate limited     (UpstreamRateLimitError)
+502 -> upstream scraping or parsing failure (ScraperError, ParseError)
+504 -> upstream timeout (ScraperTimeoutError)
+500 -> internal server error (DarazScraperError base, unhandled)
 ```
 
 Do not expose internal stack traces to API consumers.
-
-The raw payload from a failed structured extraction must **never** be returned to the client — log it server-side and return a generic `ParseError`.
 
 ---
 
 # 30. Logging
 
-The backend should log important events.
+Significant lifecycle events are logged with structured context. Full list
+in `docs/ERRORS-AND-LOGGING.md` Section 3.
 
-Example:
-
-```
-SEARCH_ST
-```
-
-Logs should include useful context such as:
-
-```
-query
-page
-number of products
-duration
-error type
-mode ("
-```
-
-Do not log secrets or API keys.
+Never log secrets, API keys, full HTML dumps, or full store payloads.
 
 ---
 
 # 31. Environment Variables
 
-Example `.env`:
+Required (in `.env`):
 
 ```
-FIRECRAWL
+FIRECRAWL_API_KEY=fc-...        # required for all scraping
+GOOGLE_API_KEY=...              # required only for the chat endpoints
 ```
 
-Future:
+Optional:
 
 ```
-LLM_API_KEY=
-DATABASE_URL=
+APP_NAME=Daraz AI Shopping Assistant
+APP_ENV=dev
+APP_DEBUG=false
+API_V1_PREFIX=/api/v1
+API_HOST=0.0.0.0
+API_PORT=8000
+FIRECRAWL_BASE_URL=https://api.firecrawl.dev
+FIRECRAWL_TIMEOUT_SECONDS=30
+FIRECRAWL_MAX_RETRIES=2
+LLM_MODEL=gemini-2.5-flash
+LLM_TEMPERATURE=0.0
+DARAZ_BASE_URL=https://www.daraz.pk
+DARAZ_SEARCH_PATH=/catalog/
+DARAZ_DEFAULT_CURRENCY=PKR
+DARAZ_ITEMS_PER_PAGE=40
+SCRAPER_DEFAULT_PAGE=1
+SCRAPE_STORE_PATH=data/scrape_store.json
+SCRAPE_STORE_SEARCH_TTL_SECONDS=21600
+SCRAPE_STORE_PRODUCT_TTL_SECONDS=86400
+LOG_LEVEL=INFO
+LOG_FORMAT=console
 ```
 
-All secrets must remain outside source code.
+`.env.example` at the repo root documents every variable.
+
+`GOOGLE_API_KEY` is optional at import time. It is validated lazily by the
+chat service when the endpoint is called without a configured key.
 
 ---
 
 # 32. Testing Strategy
 
-Testing should happen in layers.
-
 ## Unit Tests
 
-Test:
+Cover:
 
-- price parsing
-- discount parsing
+- price parsing, discount parsing, sold-count abbreviation (`8.1K`)
 - product ID extraction
-- URL extraction
+- URL extraction and URL builders
 - pagination extraction
-- Markdown parsing
-- Pydantic validation
-- **FirecrawlAdapter in both modes (Markdown + JSON), fully mocked**
+- Markdown parsing block splitting
+- Pydantic validation for every model
+- FirecrawlAdapter in both modes (Markdown + JSON), fully mocked
+- `SearchService` and `ProductService` orchestration with mocked scrapers
+- `ScrapeStore` load, get, set, prune, corrupt-file tolerance, atomicity
+- agent state schema, tool functions, graph routing, chat service
+- `recommended_products` curation in `ChatService`
 
 ## Integration Tests
 
-Test:
-
-```
-Daraz URL
-   
-```
+Reserved for end-to-end flows hitting real Daraz via Firecrawl. Marked
+`@pytest.mark.integration` and excluded from CI by default.
 
 ## API Tests
 
-Test:
+Cover every HTTP endpoint using FastAPI's `TestClient` with dependency
+overrides:
 
 ```
-GET /products/search
-GET /products/{id}
-GET /products/{id}/recommendations
+GET  /api/v1/products/search
+GET  /api/v1/products/{id}
+GET  /api/v1/products/{id}/recommendations
+POST /api/v1/chat
+POST /api/v1/chat/stream
 ```
 
-Structured-extraction tests use a **saved sample payload** as a fixture — the LLM is never called in tests.
+The LLM is never called in tests.
+
+## Current coverage
+
+All unit + API tests pass. Ruff clean. Mypy clean.
 
 ---
 
-# 33. MVP Development Order
+# 33. Development Order -- Status
 
-Implement in this order.
+## Phase 1 -- Data Models
 
-## Phase 1 — Data Models
+Pydantic models. **Done.**
 
-Create:
+## Phase 2 -- Firecrawl Integration
 
-```
-Product
-SearchFilters
-Pagination
-SearchResult
-Seller
-Shipping
-Product
-```
+`FirecrawlAdapter`. **Done.**
 
-using Pydantic. ✅ **Done.**
+## Phase 3 -- Search Parser
 
----
+`parse_search_results`. **Done.**
 
-## Phase 2 — Firecrawl Integration
+## Phase 4 -- Daraz Search Service
 
-Implement:
+`DarazScraper`, `FirecrawlDarazScraper`, URL builders, `SearchService`. **Done.**
 
-```
-FirecrawlAdapter
-```
+## Phase 5 -- FastAPI Search Endpoint
 
-Two methods: `scrape` (Markdown) and `scrape_json` (structured extraction). ✅ **Done.**
+`GET /api/v1/products/search`. **Done.**
 
----
+## Phase 6 -- Product Page Extraction
 
-## Phase 3 — Search Parser
+`ProductService.get_product()`. **Done.**
 
-Input:
+## Phase 7 -- Recommendation Extraction
 
-```
-Firecrawl Markdown
-```
+`ProductService.get_recommendations()`. **Done.**
 
-Output:
+## Phase 8 -- AI Layer
 
-```
-SearchResult
-```
+LangGraph agent, `ChatService`, `POST /api/v1/chat`. **Done.**
 
-*(Next.)*
+## Phase 9 -- Memory, Streaming, Storage
+
+Conversation memory (`MemorySaver`), Server-Sent Events streaming
+(`/api/v1/chat/stream`), local JSON scrape store, structured
+`recommended_products` in the chat response. **Done.**
 
 ---
 
-## Phase 4 — Daraz Search Service
+# 34. Definition of Done -- MVP
 
-Implement:
+The MVP is successful when:
 
-```
-search_products()
-```
+- `GET /api/v1/products/search` returns a validated `SearchResult`.
+- `GET /api/v1/products/{id}` returns a validated `ProductDetails`.
+- `GET /api/v1/products/{id}/recommendations` returns Daraz's
+recommendations when available.
+- `POST /api/v1/chat` routes correctly and returns a non-fabricated reply.
+- `POST /api/v1/chat/stream` emits tokens incrementally over SSE.
+- A repeat request for the same search or product key hits the local
+store and does not call Firecrawl.
 
-Responsibilities:
-
-```
-build URL
-→ Firecrawl (Markdown)
-→ parse
-```
-
----
-
-## Phase 5 — FastAPI Search Endpoint
-
-Implement:
-
-```
-GET /api/v1/products/search
-```
-
-At this stage the backend should already be useful without AI.
-
----
-
-## Phase 6 — Product Page Extraction
-
-Implement:
-
-```
-get_product()
-```
-
-Uses Firecrawl **structured extraction** with the `ProductDetails` schema, then validates through Pydantic.
-
----
-
-## Phase 7 — Recommendation Extraction
-
-Implement:
-
-```
-get_recommendations()
-```
-
-Reads the `recommendations` array from the product-detail payload. No second Firecrawl call.
-
----
-
-## Phase 8 — Future AI Layer
-
-Add:
-
-```
-LangGraph
-LLM
-tool calling
-conversation state
-```
-
-Only after the deterministic backend is working reliably.
-
----
-
-# 34. Definition of Done — MVP
-
-The MVP is considered successful when this workflow works reliably:
-
-```
-GET /api/v1/products/search?q=gaming+mouse&
-```
-
-produces:
-
-```
-FastAPI
-    ↓
-Search Service
-    ↓
-DarazScraper
-    ↓
-Firecrawl (Markdown mode)
-    ↓
-Daraz search page
-    ↓
-Parser
-```
-
-Then:
-
-```
-GET /api/v1/products/{id}
-```
-
-returns detailed product information (via structured extraction).
-
-And:
-
-```
-GET /api/v1/products/{id}/recommendations
-```
-
-returns Daraz's own recommendations when available.
+**Status:** All flows verified against live Daraz.
 
 ---
 
 # 35. Future Vision
 
-The eventual product should support natural-language shopping:
+Natural-language shopping:
 
 ```
-User:
-"I need a wireless
+User: "I need a wireless gaming mouse under Rs. 5,000 with RGB."
 ```
 
-The AI agent should:
+The agent should:
 
 ```
 Understand request
-      ↓
-Create search
+      |
+      v
+Create search parameters
+      |
+      v
+Search Daraz
+      |
+      v
+Extract products
+      |
+      v
+Filter/rank results
+      |
+      v
+Display products
+      |
+      v
+Allow user to inspect product
+      |
+      v
+Retrieve Daraz recommendations
+      |
+      v
+Continue conversation
 ```
 
-Examples of future interactions:
+Examples of future interactions the architecture supports:
 
-```
-"Show me cheaper ones
-```
+- "Show me cheaper ones."
+- "Only wireless products."
+- "Tell me more about the second product."
+- "Compare these three."
 
-The backend architecture must allow these capabilities to be added without rewriting the scraping layer.
+The current implementation covers search, product-detail, recommendations,
+chat with memory, streaming, and local scrape caching. Multi-turn
+filtering and comparison are extensions that do not require rewriting the
+scraping layer.
 
 ---
 
 # 36. Current Installed Dependencies
 
-The project is managed with **uv** and currently installs the following direct dependencies. Only these may be used without asking the user.
+Managed with **uv**.
 
-## 36.1 Runtime (MVP)
+## 36.1 Runtime
 
 | Package ↕▾ | Purpose ↕▾ |
 |---|---|
@@ -1365,21 +1115,19 @@ The project is managed with **uv** and currently installs the following direct d
 | −`uvicorn[standard]` | ASGI server with reload + uvloop |
 | −`pydantic` | Data models & validation |
 | −`pydantic-settings` | `.env`-driven config |
-| −`python-dotenv` | Load `.env` |
-| −`httpx` | Async HTTP client |
-| −`firecrawl-py` | Official Firecrawl SDK |
+| `python-dotenv` | Load `.env` |
+| `httpx` | Async HTTP client |
+| `firecrawl-py` | Official Firecrawl SDK |
 ⚙
 
-## 36.2 AI Layer (Phase 8 only)
+## 36.2 Chat Layer
 
 | Package ↕▾ | Purpose ↕▾ |
 |---|---|
 | −`langgraph` | Agent graph runtime |
 | −`langchain-core` | Core LLM abstractions |
-| −`langchain-google-genai` | Gemini provider (currently installed) |
+| −`langchain-google-genai` | Gemini provider |
 ⚙
-
-> Note: the currently installed provider is `langchain-google-genai`. If a different provider (OpenAI, Anthropic, etc.) is preferred, it must be swapped explicitly.
 
 ## 36.3 Dev / Tooling
 
@@ -1387,53 +1135,60 @@ The project is managed with **uv** and currently installs the following direct d
 |---|---|
 | −`pytest` | Test runner |
 | −`pytest-asyncio` | Async test support |
-| −`pytest-cov` | Coverage reports |
-| −`ruff` | Linter + formatter |
-| −`mypy` | Static type checking |
-| −`pre-commit` | Git hooks |
-| −`playwright` | Installed but **not to be used** unless explicitly requested (see §5) |
+| `pytest-cov` | Coverage reports |
+| `ruff` | Linter + formatter |
+| `mypy` | Static type checking |
+| `pre-commit` | Git hooks |
+| `playwright` | Installed but NOT used. See Section 5. |
 ⚙
 
 ## 36.4 Rules
 
 - Do not add a new dependency without asking the user first.
 - Do not use Playwright unless the user explicitly requests it.
-- Do not add Redis, Qdrant, Postgres, or background job libraries in MVP (see §3).
+- Do not add Redis, Qdrant, Postgres, or background job libraries.
 
 ---
 
 # 37. uv Commands Reference
 
-Common commands used with this project:
-
 ```
-# Initialize the project
 uv init
-
-# Pin the Python version (already pinned to 3.14)
 uv python pin 3.14
-
-# Add runtime dependencies
-uv add fast
+uv add fastapi "uvicorn[standard]" pydantic pydantic-settings \
+       python-dotenv httpx firecrawl-py
+uv add langgraph langchain-core langchain-google-genai
+uv add --dev pytest pytest-asyncio pytest-cov ruff mypy pre-commit
+uv sync
+uv run uvicorn daraz_ai_shopping_assistant.main:app --reload
+uv run pytest
+uv run ruff check .
+uv run mypy src
+uv run python scripts/generate_fixtures.py
+uv run python scripts/diagnose_search.py --query "gaming mouse"
+uv run python scripts/diagnose_product_page.py --product-id i927677133
 ```
 
 ---
 
 # 38. Package Entry Point
 
-Because the project uses a `src/` layout, the FastAPI app must be referenced as:
+The FastAPI app is referenced as:
 
 ```
 daraz_ai_shopping_assistant.main:app
 ```
 
-**Not** `app.main:app`.
+The `main.py` file lives at
+`src/daraz_ai_shopping_assistant/main.py`.
 
-The `main.py` file lives at:
+`main.py` exposes:
 
-```
-src/daraz_ai_shopping_assistant/main.py
-```
+- `create_app()` -- factory used by tests and by production.
+- `app` -- module-level instance uvicorn imports.
+
+Tests call `create_app()` to get isolated instances with their own
+dependency overrides.
 
 ---
 
@@ -1441,18 +1196,19 @@ src/daraz_ai_shopping_assistant/main.py
 
 - **Python:** 3.14 (pinned via `.python-version`)
 - **Package manager:** `uv`
-- **Layout:** `src/` layout — package name `daraz_ai_shopping_assistant`
-- **Virtual environment:** `.venv/` at repository root (created by `uv`, not committed)
+- **Layout:** `src/` layout -- package name `daraz_ai_shopping_assistant`
+- **Virtual environment:** `.venv/` at repository root
 
-All commands must be run through `uv run ...` unless the virtual environment is activated manually.
+All commands must be run through `uv run ...`.
 
 ---
 
 # 40. Architecture Decision Records
 
-Binding decisions that shape the codebase are recorded in `docs/ARCHITECTURE-DECISIONS.md`. When a change contradicts an ADR, either update the ADR or open a new one — do not silently diverge.
+Binding decisions that shape the codebase are recorded here. The full text
+of each ADR lives in `docs/ARCHITECTURE-DECISIONS.md`.
 
-## ADR-001 — Search pages use deterministic parsing; product pages use structured extraction
+## ADR-001 -- Search pages use deterministic parsing; product pages use structured extraction
 
 **Status:** Accepted (2026-09-15)
 
@@ -1460,26 +1216,259 @@ Binding decisions that shape the codebase are recorded in `docs/ARCHITECTURE-DEC
 
 | Page type ↕▾ | Adapter method ↕▾ | Extraction ↕▾ |
 |---|---|---|
-| −Search results (`/catalog/?q=...`) | `scrape(url)` → Markdown | Deterministic parser |
-| −Product detail (`/products/...`) | `scrape_json(url, schema=...)` → dict | Firecrawl structured extraction (LLM + JSON Schema) |
-| −Recommendations (nested in product page) | Same as product detail | Same as product detail, nested schema |
+| −Search results (`/catalog/?q=...`) | `scrape(url)` -> Markdown | Deterministic parser |
+| Product detail (`/products/...`) | `scrape_json(url, schema=...)` -> dict | Firecrawl structured extraction |
+| Recommendations (nested in product page) | Same as product detail | Same as product detail |
 ⚙
-
-**Why:** Search pages are high-volume and structurally uniform — Markdown parsing is cheaper and deterministic. Product detail pages have irregular layout (specifications tables, seller widgets, variant pickers, variable-length reviews) where an LLM-driven extraction is more robust than fragile regex, and the cost is acceptable at that call volume.
-
-**Consequences:**
-
-- Search pipeline remains fully deterministic. No LLM touches a search result.
-- Product detail extraction costs more Firecrawl credits.
-- Product detail extraction is non-deterministic across runs — mitigated by Pydantic validation.
-- Structured-extraction failures are harder to unit test — mitigated by saving sample payloads as fixtures.
 
 **Forbidden:**
 
 - Calling `scrape_json` on a search result page.
-- Calling `scrape` (Markdown) on a product detail page and feeding it to a regex parser.
+- Calling `scrape` (Markdown) on a product detail page and feeding it to a
+regex parser.
 - Skipping Pydantic validation on structured-extraction output.
-- Letting the LLM produce `id`, `url`, `price`, or `currency` values without validation.
 
-**Full text:** `docs/ARCHITECTURE-DECISIONS.md` §ADR-001.
+## ADR-002 -- The chat-layer LLM classifies intent and phrases replies only
+
+**Status:** Accepted (2026-09-16)
+
+**Decision:** In the LangGraph chat layer, the LLM is used for exactly two
+things:
+
+1. **Intent parsing.** Produce a structured `ParsedIntent`.
+2. **Reply phrasing.** Produce a plain-language reply from the tool result.
+
+The LLM does **not** extract product data, see raw HTML, call Firecrawl, or
+bypass the service layer.
+
+**Forbidden:**
+
+- Letting the LLM choose which tool to call based on raw text without
+structured output.
+- Letting the LLM see or paraphrase raw Firecrawl Markdown or HTML.
+- Letting the LLM construct product URLs, IDs, or prices.
+- Skipping Pydantic validation on tool results that flow back through the
+graph.
+
+---
+
+# 41. Chat Layer
+
+The chat layer lives in `src/daraz_ai_shopping_assistant/agents/` and is
+exposed through `services/chat_service.py` and the chat endpoints. It sits
+**on top of** the same validated backend services that back the REST
+endpoints. It does not replace, bypass, or duplicate them.
+
+The LLM in this layer does exactly two things (ADR-002):
+
+1. Classify the user's intent into a structured `ParsedIntent`.
+2. Phrase a plain-language reply from the tool result.
+
+It never sees raw HTML or Markdown, never extracts product fields, and
+never invents values.
+
+## 41.1 Graph Pipeline
+
+The graph is a LangGraph `StateGraph` compiled once per process.
+
+```
+              START
+                |
+                v
+         +--------------+
+         | parse_intent |   LLM.with_structured_output(ParsedIntent)
+         +--------------+
+                |
+       conditional edge on intent.intent
+                |
+     +----------+----------+-----------------+
+     |          |          |                 |
+     v          v          v                 v
+  search   get_product  get_recommendations  respond
+     |          |          |                 |
+     +----------+----------+-----------------+
+                |
+                v
+             respond  (LLM phrases the reply)
+                |
+                v
+               END
+```
+
+- `parse_intent` calls the LLM with a system prompt listing the four
+intents and the parameters each requires. Failure or malformed output
+falls back to `IntentType.SMALL_TALK`.
+- Tool nodes call the functions in `agents/tools.py`. A typed
+`DarazScraperError` is caught, logged as `AGENT_TOOL_FAILED`, and
+recorded on `AgentState.error`.
+- `respond` builds a prompt from the user's question, the parsed intent,
+any error, and a truncated JSON dump of the tool result.
+
+## 41.2 Tools
+
+`agents/tools.py` exposes three async functions:
+
+| Tool ↕▾ | Service call ↕▾ | Returns ↕▾ |
+|---|---|---|
+| −`search_products_tool(...)` | `SearchService.search` | `SearchResult` as JSON dict |
+| −`get_product_tool(product_id)` | `ProductService.get_product` | `ProductDetails` as JSON dict |
+| −`get_recommendations_tool(product_id)` | `ProductService.get_recommendations` | `{"product_id": ..., "recommendations": [...]}` |
+⚙
+
+Tools call **services**, never scrapers and never Firecrawl directly.
+
+## 41.3 ParsedIntent
+
+```
+class IntentType(StrEnum):
+    SEARCH = "search"
+    GET_PRODUCT = "get_product"
+    GET_RECOMMENDATIONS = "get_recommendations"
+    SMALL_TALK = "small_talk"
+
+class ParsedIntent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    intent: IntentType
+    query: str | None = None
+    product_id: str | None = None
+    min_price: float | None = Field(default=None, ge=0.0)
+    max_price: float | None = Field(default=None, ge=0.0)
+    page: int = Field(default=1, ge=1)
+```
+
+`ParsedIntent` is deliberately narrower than the future search-query
+schema sketched in Section 18.
+
+## 41.4 ChatService
+
+`services/chat_service.py` wraps the compiled graph behind a
+service-layer interface. It is the only place that:
+
+- builds the initial `AgentState` from a user message,
+- resolves the conversation id,
+- extracts the final reply from the graph state,
+- curates `recommended_products`,
+- shapes the response envelope (`ChatResponse`),
+- exposes a streaming variant.
+
+Error-handling policy:
+
+- A `DarazScraperError` raised inside a tool node is absorbed by the graph
+and surfaces on `AgentState.error`. `ChatService` forwards the `error`
+string to the response.
+- Unhandled exceptions from the LLM (bad API key, network failure)
+propagate to FastAPI's global exception handlers and become a generic
+500.
+
+`ChatService.chat()` logs `CHAT_STARTED` at entry and `CHAT_COMPLETED` at
+exit, including `intent`, `has_data`, `recommended_count`, `has_error`,
+and `duration_ms`.
+
+---
+
+# 42. Streaming, Conversation Memory, and Local Store
+
+This section describes the Phase 9 additions.
+
+## 42.1 Streaming endpoint
+
+```
+POST /api/v1/chat/stream
+```
+
+Request body: same as `POST /api/v1/chat`.
+
+Response: `Content-Type: text/event-stream`. Each event is one
+`data: <json>` line followed by a blank line.
+
+Event types:
+
+- `{"type": "token", "text": "..."}` -- one per LLM token as it is
+generated.
+- `{"type": "done", "conversation_id": ..., "intent": ..., "recommended_products": [...], "error": ...}` -- once, after the stream completes.
+
+Terminal sentinel:
+
+```
+data: [DONE]
+```
+
+Only tokens from the reply-phrasing LLM call are streamed. The
+intent-parsing call is filtered out by `metadata.langgraph_node == "respond"`.
+
+If an internal error occurs during streaming:
+
+```
+data: {"type": "error", "message": "Internal server error."}
+data: [DONE]
+```
+
+## 42.2 Conversation memory
+
+The graph is compiled with a LangGraph checkpointer (`MemorySaver` in
+production, injected via `warm_compiled_graph()` from the app lifespan).
+
+- State is keyed by `thread_id`, which the service sets to the resolved
+`conversation_id`.
+- If the client omits `conversation_id`, the server generates a UUID and
+returns it in the response.
+- A new process starts with an empty checkpointer. Conversations do NOT
+survive a restart.
+- The checkpointer holds the full history; the LLM only sees the last 16
+messages (8 turns) via `trim_messages(strategy="last", start_on="human")`.
+- Both `parse_intent` and `respond` see the trimmed history, so follow-up
+turns resolve correctly.
+
+## 42.3 recommended_products
+
+Every chat response includes a structured `recommended_products` list.
+The list is populated by `ChatService._curate_recommended_products`:
+
+| Intent ↕▾ | Content ↕▾ | Limit ↕▾ |
+|---|---|---|
+| −`search` | first N products from the search result | 5 |
+| −`get_product` | the single product as a one-item list | 1 |
+| −`get_recommendations` | first N recommendations from the tool result | 5 |
+| −`small_talk` | empty list | -- |
+| −tool error | empty list | -- |
+⚙
+
+This mirrors the window the LLM's prompt instructs it to prefer, avoiding
+a second LLM call to extract which products were mentioned.
+
+## 42.4 Local scrape store
+
+Successful search and product-detail scrapes are written to a JSON file
+on disk (`data/scrape_store.json` by default).
+
+Key format:
+
+- Search: `search:{query}|{min_price}|{max_price}|{page}` (`~` for missing
+bounds).
+- Product: `product:{product_id}`.
+
+Default TTLs: 6 hours for search, 24 hours for product. Configurable via
+`SCRAPE_STORE_SEARCH_TTL_SECONDS` and `SCRAPE_STORE_PRODUCT_TTL_SECONDS`.
+
+Behaviour:
+
+- Loaded once at app startup and attached to the service singletons.
+- Read path: `get(key)` returns the payload if not expired.
+- Write path: `set(key, ...)` writes the entire file atomically
+(`tempfile` + `os.replace`).
+- Expired entries are pruned at load and again on shutdown.
+- A missing, corrupt, or empty file is treated as an empty store. The app
+never crashes on bad persisted state.
+- No eviction policy. A one-shot warning is logged at 10 MB.
+- Only the service layer touches the store. Routes, scrapers, parsers, and
+agents must never import `storage/`.
+
+The store is explicitly NOT a database and NOT a caching layer in the sense
+that Non-Goal Section 3 forbids. It is local durability for scrape payloads
+and is bounded by TTL.
+
+---
+
+End of Specification.
 

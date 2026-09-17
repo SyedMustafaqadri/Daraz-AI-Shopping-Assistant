@@ -19,25 +19,30 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from langgraph.checkpoint.memory import MemorySaver
 
 from daraz_ai_shopping_assistant import __version__
+from daraz_ai_shopping_assistant.agents.graph import warm_compiled_graph
 from daraz_ai_shopping_assistant.api import api_router
 from daraz_ai_shopping_assistant.api.exception_handlers import register_exception_handlers
 from daraz_ai_shopping_assistant.core.config import settings
 from daraz_ai_shopping_assistant.core.logging import configure_logging, get_logger
+from daraz_ai_shopping_assistant.services.product_service import get_product_service
+from daraz_ai_shopping_assistant.services.search_service import get_search_service
+from daraz_ai_shopping_assistant.storage.json_store import ScrapeStore
 
 logger = get_logger(__name__)
-
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncGenerator[None]:
     """FastAPI lifespan context.
 
-    Runs once at startup and once at shutdown. Configures logging and
-    emits ``APP_STARTED`` / ``APP_STOPPED`` lifecycle events.
+    Runs once at startup and once at shutdown. Configures logging,
+    initialises the scrape store, wires the process-wide service
+    singletons, and prepares the conversation checkpointer.
 
     Args:
-        app: The FastAPI application (unused; required by the protocol).
+        app: The FastAPI application.
 
     Yields:
         Control back to FastAPI for the duration of the app's lifetime.
@@ -53,9 +58,37 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None]:
             }
         },
     )
-    yield
-    logger.info("APP_STOPPED")
 
+    # Local JSON persistence for scrape payloads.
+    store = ScrapeStore.load(settings.scrape_store_path)
+    app.state.scrape_store = store
+    # Warm the service singletons so the first request does not pay the
+    # cost of wiring them, and so the store is bound before any call.
+    get_search_service(store=store)
+    get_product_service(store=store)
+
+    # In-memory conversation checkpointer. A new process starts with an
+    # empty store: conversations do not survive a restart by design.
+    checkpointer = MemorySaver()
+    app.state.checkpointer = checkpointer
+    warm_compiled_graph(checkpointer=checkpointer)
+
+    try:
+        yield
+    finally:
+        # Prune expired entries on shutdown so the file shrinks between
+        # runs. Best-effort: a failure here must not prevent shutdown.
+        try:
+            removed = await store.prune()
+            if removed:
+                logger.info(
+                    "SCRAPE_STORE_PRUNED",
+                    extra={"ctx": {"removed": removed, "remaining": store.size}},
+                )
+        except Exception:
+            logger.exception("SCRAPE_STORE_PRUNE_FAILED")
+
+        logger.info("APP_STOPPED")
 
 def create_app() -> FastAPI:
     """Build and return a configured FastAPI application.
@@ -117,7 +150,6 @@ def create_app() -> FastAPI:
         }
 
     return app
-
 
 # Module-level instance for uvicorn. Do not import this in tests -- call
 # create_app() instead so overrides are scoped per test.

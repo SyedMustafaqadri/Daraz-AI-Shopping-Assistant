@@ -13,6 +13,7 @@ The service is the ONLY layer that:
     - converts a Pydantic ValidationError into a typed ParseError,
     - normalises small LLM quirks on the way out (see _normalise_product_id),
     - emits the PRODUCT_FETCH_* lifecycle events,
+    - reads from and writes to the local scrape store,
     - exposes the recommendations list from the product payload.
 
 Unlike the search service, this service does not need pagination or
@@ -28,6 +29,7 @@ import time
 
 from pydantic import ValidationError
 
+from daraz_ai_shopping_assistant.core.config import settings
 from daraz_ai_shopping_assistant.core.exceptions import (
     DarazScraperError,
     InvalidRequestError,
@@ -39,6 +41,7 @@ from daraz_ai_shopping_assistant.models.product import ProductDetails
 from daraz_ai_shopping_assistant.models.recommendation import Recommendation
 from daraz_ai_shopping_assistant.scrapers.base import DarazScraper
 from daraz_ai_shopping_assistant.scrapers.daraz import FirecrawlDarazScraper
+from daraz_ai_shopping_assistant.storage.json_store import ScrapeStore
 
 logger = get_logger(__name__)
 
@@ -57,18 +60,28 @@ class ProductService:
 
     Attributes:
         _scraper: The ``DarazScraper`` used to fetch the structured payload.
+        _store: Optional :class:`ScrapeStore` for payload persistence.
+            When ``None``, every request scrapes fresh.
     """
 
-    def __init__(self, scraper: DarazScraper | None = None) -> None:
+    def __init__(
+        self,
+        scraper: DarazScraper | None = None,
+        *,
+        store: ScrapeStore | None = None,
+    ) -> None:
         """Initialise the service.
 
         Args:
             scraper: Optional scraper to use. When ``None``, a default
                 ``FirecrawlDarazScraper`` is created. Tests inject a mock.
+            store: Optional scrape store for local persistence. When
+                ``None``, the service scrapes on every call.
         """
         self._scraper: DarazScraper = (
             scraper if scraper is not None else FirecrawlDarazScraper()
         )
+        self._store: ScrapeStore | None = store
 
     # ------------------------------------------------------------------ #
     # Public API
@@ -93,6 +106,17 @@ class ProductService:
                 limit, generic scraper error). Mapped by the API layer.
         """
         normalized_id = self._validate_product_id(product_id)
+        cache_key = f"product:{normalized_id}"
+
+        # 1. Store lookup. A hit short-circuits the whole scrape path.
+        if self._store is not None:
+            cached = self._store.get(cache_key)
+            if cached is not None:
+                logger.info(
+                    "PRODUCT_STORE_HIT",
+                    extra={"ctx": {"product_id": normalized_id, "key": cache_key}},
+                )
+                return ProductDetails.model_validate(cached)
 
         logger.info(
             "PRODUCT_FETCH_STARTED",
@@ -100,7 +124,7 @@ class ProductService:
         )
         started_at = time.monotonic()
 
-        # 1. Fetch the structured payload via the scraper. Typed errors
+        # 2. Fetch the structured payload via the scraper. Typed errors
         #    from the scraper propagate unchanged -- the API layer already
         #    knows how to map them to HTTP status codes.
         try:
@@ -118,14 +142,14 @@ class ProductService:
                 context={"product_id": normalized_id, "error": type(exc).__name__},
             ) from exc
 
-        # 2. An empty payload means Daraz served us a "not found" page.
+        # 3. An empty payload means Daraz served us a "not found" page.
         if not payload:
             raise ProductNotFoundError(
                 f"Product {normalized_id!r} was not found on Daraz.",
                 context={"product_id": normalized_id},
             )
 
-        # 3. Validate the payload through Pydantic. A ValidationError means
+        # 4. Validate the payload through Pydantic. A ValidationError means
         #    either the LLM extraction drifted or Daraz changed the page.
         #    Either way it is an upstream problem, so it maps to 502.
         try:
@@ -150,7 +174,7 @@ class ProductService:
                 },
             ) from exc
 
-        # 4. Normalise small LLM quirks. The id field in particular is
+        # 5. Normalise small LLM quirks. The id field in particular is
         #    reliable in input but frequently loses its "i" prefix during
         #    extraction.
         product = _normalise_product_id(product, requested_id=normalized_id)
@@ -166,6 +190,16 @@ class ProductService:
                 }
             },
         )
+
+        # 6. Persist for future requests.
+        if self._store is not None:
+            await self._store.set(
+                cache_key,
+                kind="product",
+                payload=product.model_dump(mode="json"),
+                ttl_seconds=settings.scrape_store_product_ttl_seconds,
+            )
+
         return product
 
     async def get_recommendations(self, product_id: str) -> list[Recommendation]:
@@ -303,19 +337,25 @@ def _first_error_summary(exc: ValidationError) -> str:
 # ---------------------------------------------------------------------- #
 _default_service: ProductService | None = None
 
-def get_product_service() -> ProductService:
+def get_product_service(store: ScrapeStore | None = None) -> ProductService:
     """Return a lazily-constructed, process-wide ``ProductService``.
 
     Mirrors the pattern used by ``search_service.get_search_service``.
     Tests should instantiate ``ProductService`` directly with an injected
     scraper rather than using this singleton.
 
+    The first call wins the ``store`` argument. Startup warms the
+    singleton with the app's store.
+
+    Args:
+        store: Optional scrape store. Only used on the first call.
+
     Returns:
         The shared ``ProductService`` instance.
     """
     global _default_service
     if _default_service is None:
-        _default_service = ProductService()
+        _default_service = ProductService(store=store)
     return _default_service
 
 __all__ = ["ProductService", "get_product_service"]

@@ -24,7 +24,7 @@ settings.firecrawl_api_key
 
 ## 2. Example `.env`
 
-```ini
+```
 APP_NAME="Daraz AI Shopping Assistant"
 APP_ENV=dev
 APP_DEBUG=false
@@ -49,12 +49,17 @@ DARAZ_ITEMS_PER_PAGE=40
 
 SCRAPER_DEFAULT_PAGE=1
 
+SCRAPE_STORE_PATH=data/scrape_store.json
+SCRAPE_STORE_SEARCH_TTL_SECONDS=21600
+SCRAPE_STORE_PRODUCT_TTL_SECONDS=86400
+
 LOG_LEVEL=INFO
 LOG_FORMAT=console
 ```
 
-The chat endpoint requires `GOOGLE_API_KEY` and the model settings. The
-search and product endpoints only require `FIRECRAWL_API_KEY`.
+The chat endpoints require `GOOGLE_API_KEY`. The search and product
+endpoints only require `FIRECRAWL_API_KEY`. The scrape-store settings have
+safe defaults and are optional.
 
 ---
 
@@ -85,32 +90,46 @@ search and product endpoints only require `FIRECRAWL_API_KEY`.
 | `firecrawl_timeout_seconds` | `FIRECRAWL_TIMEOUT_SECONDS` | `30.0` | `> 0` |
 | `firecrawl_max_retries` | `FIRECRAWL_MAX_RETRIES` | `2` | `0..5` |
 
-The `firecrawl_api_key` validator runs in `mode="before"` and rejects missing,
-empty, or whitespace-only values before Pydantic coerces them.
+The `firecrawl_api_key` validator runs in `mode="before"` and rejects
+missing, empty, or whitespace-only values before Pydantic coerces them.
 
 ### LLM / chat
 
-| Field | Env var | Default | Notes |
+| Field ↕▾ | Env var ↕▾ | Default ↕▾ | Notes ↕▾ |
 |---|---|---|---|
-| `google_api_key` | `GOOGLE_API_KEY` | `""` | required for the chat endpoint |
-| `llm_model` | `LLM_MODEL` | `"gemini-2.5-flash"` | model identifier |
+| −`google_api_key` | `GOOGLE_API_KEY` | `""` | required for chat endpoints |
+| −`llm_model` | `LLM_MODEL` | `"gemini-2.5-flash"` | model identifier |
 | `llm_temperature` | `LLM_TEMPERATURE` | `0.0` | `0.0..2.0` |
+⚙
 
 ### Daraz
 
-| Field | Env var | Default | Notes |
+| Field ↕▾ | Env var ↕▾ | Default ↕▾ | Notes ↕▾ |
 |---|---|---|---|
-| `daraz_base_url` | `DARAZ_BASE_URL` | `"https://www.daraz.pk"` | trailing slash is stripped |
+| −`daraz_base_url` | `DARAZ_BASE_URL` | `"https://www.daraz.pk"` | trailing slash is stripped |
 | `daraz_search_path` | `DARAZ_SEARCH_PATH` | `"/catalog/"` | Daraz search path |
 | `daraz_default_currency` | `DARAZ_DEFAULT_CURRENCY` | `"PKR"` | default currency code |
 | `daraz_items_per_page` | `DARAZ_ITEMS_PER_PAGE` | `40` | observed page size |
+⚙
 
 ### Scraper behaviour
 
+| Field ↕▾ | Env var ↕▾ | Default ↕▾ | Notes ↕▾ |
+|---|---|---|---|
+| −`scraper_user_agent` | `SCRAPER_USER_AGENT` | Chrome 126 UA | used in requests |
+| `scraper_default_page` | `SCRAPER_DEFAULT_PAGE` | `1` | minimum `1` |
+⚙
+
+### Scrape store (local JSON persistence)
+
 | Field | Env var | Default | Notes |
 |---|---|---|---|
-| `scraper_user_agent` | `SCRAPER_USER_AGENT` | Chrome 126 UA | used in requests |
-| `scraper_default_page` | `SCRAPER_DEFAULT_PAGE` | `1` | minimum `1` |
+| `scrape_store_path` | `SCRAPE_STORE_PATH` | `"data/scrape_store.json"` | Relative paths resolve from the process working directory. Parent dir auto-created. |
+| `scrape_store_search_ttl_seconds` | `SCRAPE_STORE_SEARCH_TTL_SECONDS` | `21600` (6 hours) | TTL for cached search-result payloads |
+| `scrape_store_product_ttl_seconds` | `SCRAPE_STORE_PRODUCT_TTL_SECONDS` | `86400` (24 hours) | TTL for cached product-detail payloads |
+
+The store is loaded once at app startup. Expired entries are pruned at load
+time and again on shutdown. Delete the file to force a cold cache.
 
 ### Logging
 
@@ -127,3 +146,6 @@ empty, or whitespace-only values before Pydantic coerces them.
 - unknown env vars are ignored because `extra="ignore"`
 - `daraz_base_url` is normalised by stripping trailing `/`
 - in `APP_ENV=dev`, the app adds permissive CORS middleware; outside dev, CORS is not enabled
+- the scrape store is created on first run if it does not exist; a corrupt
+or empty file is treated as an empty store rather than crashing startup
+

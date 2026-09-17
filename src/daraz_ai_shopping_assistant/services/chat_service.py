@@ -6,8 +6,11 @@ that the API route stays thin and the graph stays testable.
 The service is the ONLY place that:
 
     - constructs the initial AgentState from a user message,
+    - derives or echoes the conversation id,
     - extracts the final reply from the graph output,
-    - shapes the response envelope for the API layer.
+    - curates the structured ``recommended_products`` list,
+    - shapes the response envelope for the API layer,
+    - exposes a streaming variant for Server-Sent Events clients.
 
 Error handling policy:
 
@@ -25,9 +28,11 @@ Error handling policy:
 from __future__ import annotations
 
 import time
+from collections.abc import AsyncIterator, Sequence
 from typing import Any
+from uuid import uuid4
 
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 
 from daraz_ai_shopping_assistant.agents.graph import get_compiled_graph
 from daraz_ai_shopping_assistant.agents.state import AgentState
@@ -35,6 +40,11 @@ from daraz_ai_shopping_assistant.core.logging import get_logger
 from daraz_ai_shopping_assistant.schemas.chat import ChatResponse
 
 logger = get_logger(__name__)
+
+#: Maximum number of products included in ``recommended_products``.
+#: Matches the instruction in ``_RESPONSE_SYSTEM_PROMPT``: the LLM is told
+#: to present "the most relevant ones ... do not list more than 5 products".
+_RECOMMENDED_LIMIT: int = 5
 
 class ChatService:
     """Route a user message through the LangGraph agent.
@@ -52,11 +62,20 @@ class ChatService:
         """
         self._graph: Any | None = graph
 
-    async def chat(self, message: str) -> ChatResponse:
+    # ------------------------------------------------------------------ #
+    # Non-streaming chat
+    # ------------------------------------------------------------------ #
+    async def chat(
+        self,
+        message: str,
+        conversation_id: str | None = None,
+    ) -> ChatResponse:
         """Process a user message and return the assistant's response.
 
         Args:
             message: The user's message.
+            conversation_id: Optional conversation identifier. When
+                ``None`` or blank, a new UUID is generated and returned.
 
         Returns:
             A fully-populated ChatResponse. When a tool inside the graph
@@ -64,11 +83,18 @@ class ChatService:
             call itself does not raise for tool failures.
         """
         graph = self._graph if self._graph is not None else get_compiled_graph()
+        resolved_id = _resolve_conversation_id(conversation_id)
 
         started_at = time.monotonic()
         logger.info(
             "CHAT_STARTED",
-            extra={"ctx": {"message_length": len(message)}},
+            extra={
+                "ctx": {
+                    "message_length": len(message),
+                    "conversation_id": resolved_id,
+                    "streaming": False,
+                }
+            },
         )
 
         initial_state: AgentState = {
@@ -77,36 +103,263 @@ class ChatService:
             "tool_result": None,
             "error": None,
         }
+        config = _thread_config(resolved_id)
 
-        final_state = await graph.ainvoke(initial_state)
+        final_state = await graph.ainvoke(initial_state, config=config)
 
         reply = _extract_reply(final_state)
         intent = final_state.get("intent")
         tool_result = final_state.get("tool_result")
         error = final_state.get("error")
+        recommended = _curate_recommended_products(intent, tool_result)
 
         duration_ms = int((time.monotonic() - started_at) * 1000)
         logger.info(
             "CHAT_COMPLETED",
             extra={
                 "ctx": {
+                    "conversation_id": resolved_id,
                     "intent": intent.intent.value if intent else None,
                     "has_data": tool_result is not None,
+                    "recommended_count": len(recommended),
                     "has_error": error is not None,
                     "duration_ms": duration_ms,
+                    "streaming": False,
                 }
             },
         )
 
         return ChatResponse(
             reply=reply,
+            conversation_id=resolved_id,
             intent=intent.intent.value if intent else None,
+            recommended_products=recommended,
             data=tool_result,
             error=error,
         )
 
+    # ------------------------------------------------------------------ #
+    # Streaming chat
+    # ------------------------------------------------------------------ #
+    async def chat_stream(
+        self,
+        message: str,
+        conversation_id: str | None = None,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Stream a chat response token-by-token.
+
+        Yields event dicts suitable for JSON-serialising straight into an
+        SSE frame. The consumer (``api/chat.py``) is responsible for the
+        ``data: ...`` framing and the terminal ``[DONE]`` sentinel.
+
+        Event shapes:
+
+            {"type": "token", "text": "..."} -- one LLM token.
+            {"type": "done", "conversation_id": "...", "intent": "...",
+             "recommended_products": [...], "error": null | "..."} -- end.
+
+        Only tokens produced by the ``respond`` node are emitted. The
+        ``parse_intent`` node also calls the LLM, but its output is a
+        structured object that must not be streamed to the client.
+
+        Args:
+            message: The user's message.
+            conversation_id: Optional conversation identifier. When
+                ``None`` or blank, a new UUID is generated.
+
+        Yields:
+            Dicts, one per streamed token and one terminal ``done`` event.
+        """
+        graph = self._graph if self._graph is not None else get_compiled_graph()
+        resolved_id = _resolve_conversation_id(conversation_id)
+
+        started_at = time.monotonic()
+        logger.info(
+            "CHAT_STARTED",
+            extra={
+                "ctx": {
+                    "message_length": len(message),
+                    "conversation_id": resolved_id,
+                    "streaming": True,
+                }
+            },
+        )
+
+        initial_state: AgentState = {
+            "messages": [HumanMessage(content=message)],
+            "intent": None,
+            "tool_result": None,
+            "error": None,
+        }
+        config = _thread_config(resolved_id)
+
+        token_count = 0
+        async for event in graph.astream_events(
+            initial_state, config=config, version="v2"
+        ):
+            if event.get("event") != "on_chat_model_stream":
+                continue
+            metadata = event.get("metadata") or {}
+            if metadata.get("langgraph_node") != "respond":
+                continue
+            chunk = event.get("data", {}).get("chunk")
+            text = _chunk_text(chunk)
+            if not text:
+                continue
+            token_count += 1
+            yield {"type": "token", "text": text}
+
+        # Fetch the final state from the checkpointer for the terminal
+        # event. The non-streaming node code already wrote everything we
+        # need (intent, tool_result, error) into the state.
+        final_values: dict[str, Any] = {}
+        try:
+            snapshot = await graph.aget_state(config)
+            final_values = dict(snapshot.values) if snapshot is not None else {}
+        except Exception:
+            logger.exception(
+                "CHAT_STREAM_STATE_LOOKUP_FAILED",
+                extra={"ctx": {"conversation_id": resolved_id}},
+            )
+
+        intent_obj = final_values.get("intent")
+        tool_result = final_values.get("tool_result")
+        error_value = final_values.get("error")
+        recommended = _curate_recommended_products(intent_obj, tool_result)
+
+        duration_ms = int((time.monotonic() - started_at) * 1000)
+        logger.info(
+            "CHAT_COMPLETED",
+            extra={
+                "ctx": {
+                    "conversation_id": resolved_id,
+                    "intent": intent_obj.intent.value if intent_obj else None,
+                    "recommended_count": len(recommended),
+                    "has_error": error_value is not None,
+                    "token_count": token_count,
+                    "duration_ms": duration_ms,
+                    "streaming": True,
+                }
+            },
+        )
+
+        yield {
+            "type": "done",
+            "conversation_id": resolved_id,
+            "intent": intent_obj.intent.value if intent_obj else None,
+            "recommended_products": recommended,
+            "error": error_value,
+        }
+
+# ---------------------------------------------------------------------- #
+# Helpers
+# ---------------------------------------------------------------------- #
+def _resolve_conversation_id(conversation_id: str | None) -> str:
+    """Return a usable conversation identifier.
+
+    Args:
+        conversation_id: Client-supplied identifier, or ``None``.
+
+    Returns:
+        A non-empty string: the client's value when it is non-blank, a
+        freshly generated UUID otherwise.
+    """
+    if isinstance(conversation_id, str):
+        stripped = conversation_id.strip()
+        if stripped:
+            return stripped
+    return str(uuid4())
+
+def _thread_config(conversation_id: str) -> dict[str, Any]:
+    """Build the LangGraph config carrying the thread id.
+
+    Args:
+        conversation_id: The resolved conversation identifier.
+
+    Returns:
+        A config dict of the shape LangGraph's checkpointer expects.
+    """
+    return {"configurable": {"thread_id": conversation_id}}
+
+def _curate_recommended_products(
+    intent: Any,
+    tool_result: dict[str, Any] | None,
+    *,
+    limit: int = _RECOMMENDED_LIMIT,
+) -> list[dict[str, Any]]:
+    """Return the structured list of products the assistant recommends.
+
+    The LLM's prompt instructs it to present the top N products from the
+    tool result. Extracting WHICH products it mentioned would require a
+    second LLM call or fragile parsing of its prose. Instead we mirror the
+    window it was told to work from: the first ``limit`` products.
+
+    Args:
+        intent: The ParsedIntent stored on AgentState, or ``None``.
+        tool_result: The tool result dict, or ``None``.
+        limit: Maximum number of products to return.
+
+    Returns:
+        A list of product dicts (possibly empty). Each dict is a
+        Pydantic-validated product as serialised by the service layer.
+    """
+    if intent is None or tool_result is None:
+        return []
+
+    intent_kind = getattr(intent, "intent", None)
+    intent_value = getattr(intent_kind, "value", intent_kind)
+
+    if intent_value == "search":
+        products = tool_result.get("products") or []
+        return [p for p in products[:limit] if isinstance(p, dict)]
+
+    if intent_value == "get_product":
+        if isinstance(tool_result, dict) and tool_result.get("id"):
+            return [tool_result]
+        return []
+
+    if intent_value == "get_recommendations":
+        recs = tool_result.get("recommendations") or []
+        return [r for r in recs[:limit] if isinstance(r, dict)]
+
+    return []
+
+def _chunk_text(chunk: Any) -> str:
+    """Extract the text from an ``on_chat_model_stream`` chunk.
+
+    Chunk content varies by provider: a plain string, a list of content
+    blocks, or a message object whose ``content`` holds either.
+
+    Args:
+        chunk: The ``data.chunk`` value from the stream event.
+
+    Returns:
+        The token text, or an empty string when no text is present.
+    """
+    if chunk is None:
+        return ""
+    content: Any = getattr(chunk, "content", chunk)
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict) and block.get("type") == "text":
+                parts.append(str(block.get("text", "")))
+        return "".join(parts)
+    if isinstance(content, dict):
+        text = content.get("text")
+        return str(text) if text is not None else ""
+    return ""
+
 def _extract_reply(state: AgentState) -> str:
     """Return the last AIMessage's text from the final state.
+
+    The local variable is typed ``Sequence`` so that LangGraph's
+    ``list[AnyMessage]`` can be assigned without a cast -- ``list`` is
+    invariant, ``Sequence`` is covariant.
 
     Args:
         state: The graph's final state.
@@ -116,7 +369,7 @@ def _extract_reply(state: AgentState) -> str:
         produced (should not happen in practice, but the endpoint must
         never return an empty body).
     """
-    messages = state.get("messages") or []
+    messages: Sequence[BaseMessage] = state.get("messages") or []
     for message in reversed(messages):
         if isinstance(message, AIMessage):
             content = message.content

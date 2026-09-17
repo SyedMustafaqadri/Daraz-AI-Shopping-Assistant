@@ -101,7 +101,7 @@ class Settings(BaseSettings):
     )
 
     # ------------------------------------------------------------------ #
-    # LLM (Phase 8 -- agent layer)
+    # LLM (chat layer)
     # ------------------------------------------------------------------ #
     # `google_api_key` is optional at import time because the deterministic
     # endpoints (search, product, recommendations) do not need it. It is
@@ -158,6 +158,28 @@ class Settings(BaseSettings):
         default=1,
         ge=1,
         description="Default page number for search requests.",
+    )
+
+    # ------------------------------------------------------------------ #
+    # Scrape store (local JSON persistence)
+    # ------------------------------------------------------------------ #
+    scrape_store_path: str = Field(
+        default="data/scrape_store.json",
+        description=(
+            "Path to the JSON file that persists validated scrape "
+            "payloads. Relative paths resolve from the process working "
+            "directory. The parent directory is created on startup."
+        ),
+    )
+    scrape_store_search_ttl_seconds: int = Field(
+        default=6 * 3600,
+        ge=1,
+        description="TTL for persisted search-result payloads, in seconds.",
+    )
+    scrape_store_product_ttl_seconds: int = Field(
+        default=24 * 3600,
+        ge=1,
+        description="TTL for persisted product-detail payloads, in seconds.",
     )
 
     # ------------------------------------------------------------------ #

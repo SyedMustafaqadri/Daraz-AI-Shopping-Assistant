@@ -12,7 +12,8 @@ The service is the ONLY layer that:
     - attaches a timestamp to a response,
     - constructs the filter and pagination envelopes,
     - decides what to do when a product fails validation (drop + log),
-    - emits the SEARCH_* lifecycle events.
+    - emits the SEARCH_* lifecycle events,
+    - reads from and writes to the local scrape store.
 
 Everything above this layer (API routes, LangGraph tools) calls the service.
 Everything below it (scraper, parser, adapter) knows nothing about HTTP or
@@ -26,6 +27,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from daraz_ai_shopping_assistant.core.config import settings
 from daraz_ai_shopping_assistant.core.logging import get_logger
 from daraz_ai_shopping_assistant.models.product import Product
 from daraz_ai_shopping_assistant.models.search import (
@@ -36,6 +38,7 @@ from daraz_ai_shopping_assistant.models.search import (
 from daraz_ai_shopping_assistant.parsers.search_parser import parse_search_results
 from daraz_ai_shopping_assistant.scrapers.base import DarazScraper
 from daraz_ai_shopping_assistant.scrapers.daraz import FirecrawlDarazScraper
+from daraz_ai_shopping_assistant.storage.json_store import ScrapeStore
 from daraz_ai_shopping_assistant.utils.datetime import pkt_now
 
 logger = get_logger(__name__)
@@ -45,17 +48,27 @@ class SearchService:
 
     Attributes:
         _scraper: The :class:`DarazScraper` used to fetch raw content.
+        _store: Optional :class:`ScrapeStore` for payload persistence.
+            When ``None``, every request scrapes fresh.
     """
 
-    def __init__(self, scraper: DarazScraper | None = None) -> None:
+    def __init__(
+        self,
+        scraper: DarazScraper | None = None,
+        *,
+        store: ScrapeStore | None = None,
+    ) -> None:
         """Initialise the service.
 
         Args:
             scraper: Optional scraper to use. When ``None``, a default
                 :class:`FirecrawlDarazScraper` is created. Tests inject a
                 mock here to avoid hitting the network.
+            store: Optional scrape store for local persistence. When
+                ``None``, the service scrapes on every call.
         """
         self._scraper: DarazScraper = scraper if scraper is not None else FirecrawlDarazScraper()
+        self._store: ScrapeStore | None = store
 
     # ------------------------------------------------------------------ #
     # Public API
@@ -96,6 +109,23 @@ class SearchService:
         # that bad input fails before we pay for a network call.
         filters = SearchFilters(min_price=min_price, max_price=max_price)
 
+        cache_key = _build_search_key(
+            normalized_query,
+            min_price=min_price,
+            max_price=max_price,
+            page=page,
+        )
+
+        # 1. Store lookup. A hit short-circuits the whole scrape path.
+        if self._store is not None:
+            cached = self._store.get(cache_key)
+            if cached is not None:
+                logger.info(
+                    "SEARCH_STORE_HIT",
+                    extra={"ctx": {"query": normalized_query, "page": page, "key": cache_key}},
+                )
+                return SearchResult.model_validate(cached)
+
         started_at = time.monotonic()
         logger.info(
             "SEARCH_STARTED",
@@ -109,7 +139,7 @@ class SearchService:
             },
         )
 
-        # 1. Fetch raw Markdown from Daraz via the scraper.
+        # 2. Fetch raw Markdown from Daraz via the scraper.
         markdown = await self._scraper.fetch_search_markdown(
             normalized_query,
             min_price=min_price,
@@ -117,7 +147,7 @@ class SearchService:
             page=page,
         )
 
-        # 2. Parse into untrusted dicts.
+        # 3. Parse into untrusted dicts.
         parsed = parse_search_results(markdown, current_page=page)
 
         raw_products = parsed.get("products", [])
@@ -133,10 +163,10 @@ class SearchService:
             },
         )
 
-        # 3. Validate each product; drop invalid ones.
+        # 4. Validate each product; drop invalid ones.
         valid_products = self._validate_products(raw_products, query=normalized_query)
 
-        # 4. Assemble the response envelope.
+        # 5. Assemble the response envelope.
         pagination = _coerce_pagination(parsed.get("pagination"))
         result = SearchResult(
             search_query=normalized_query,
@@ -170,6 +200,17 @@ class SearchService:
                         "raw_count": len(raw_products),
                     }
                 },
+            )
+
+        # 6. Persist for future requests. Only successful, non-empty pages
+        #    are stored -- a transient empty page should not become the
+        #    cached answer for the next six hours.
+        if self._store is not None and valid_products:
+            await self._store.set(
+                cache_key,
+                kind="search",
+                payload=result.model_dump(mode="json"),
+                ttl_seconds=settings.scrape_store_search_ttl_seconds,
             )
 
         return result
@@ -214,6 +255,35 @@ class SearchService:
                     },
                 )
         return valid
+
+# ---------------------------------------------------------------------- #
+# Cache-key construction
+# ---------------------------------------------------------------------- #
+def _build_search_key(
+    query: str,
+    *,
+    min_price: float | None,
+    max_price: float | None,
+    page: int,
+) -> str:
+    """Build the canonical cache key for a search request.
+
+    The key must be deterministic across requests. ``None`` and the
+    float-cast string of a number must not collide, so a sentinel of
+    ``"~"`` is used for missing bounds.
+
+    Args:
+        query: Normalised (stripped) search query.
+        min_price: Lower bound, or ``None``.
+        max_price: Upper bound, or ``None``.
+        page: 1-indexed page number.
+
+    Returns:
+        A string of the form ``"search:{query}|{min}|{max}|{page}"``.
+    """
+    lo = "~" if min_price is None else str(min_price)
+    hi = "~" if max_price is None else str(max_price)
+    return f"search:{query}|{lo}|{hi}|{page}"
 
 # ---------------------------------------------------------------------- #
 # Coercion helpers
@@ -280,7 +350,7 @@ def _first_error_summary(exc: ValidationError) -> str:
 # ---------------------------------------------------------------------- #
 _default_service: SearchService | None = None
 
-def get_search_service() -> SearchService:
+def get_search_service(store: ScrapeStore | None = None) -> SearchService:
     """Return a lazily-constructed, process-wide :class:`SearchService`.
 
     The singleton exists so that the FastAPI route layer does not pay the
@@ -288,12 +358,19 @@ def get_search_service() -> SearchService:
     use this -- they should instantiate :class:`SearchService` directly
     with an injected scraper.
 
+    The first call wins the ``store`` argument. Subsequent calls with a
+    different store are ignored, which keeps the singleton semantics
+    simple. Startup warms the singleton with the app's store.
+
+    Args:
+        store: Optional scrape store. Only used on the first call.
+
     Returns:
         The shared :class:`SearchService` instance.
     """
     global _default_service
     if _default_service is None:
-        _default_service = SearchService()
+        _default_service = SearchService(store=store)
     return _default_service
 
 async def search_products(

@@ -1,6 +1,6 @@
 """LangGraph state machine for the chat pipeline.
 
-The graph has four nodes:
+The graph has five nodes:
 
     - ``parse_intent``   -- LLM classifies the user's message and extracts
                             parameters. Uses structured output so the
@@ -20,11 +20,19 @@ The LLM never sees raw Daraz HTML. It sees the user's message, the parsed
 intent, and a JSON dump of the tool result -- all of which are already
 validated structures. It cannot invent product data because the data comes
 from the tools, and the response node is instructed to work only from that.
+
+Conversation memory:
+
+    When a checkpointer is passed to :func:`build_graph`, the compiled
+    graph persists conversation state per ``thread_id``. Both LLM nodes
+    trim the message history to the last ``_MAX_CONTEXT_MESSAGES`` before
+    calling the model, so a long conversation does not grow unbounded.
 """
 
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from typing import Any
 
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -33,6 +41,7 @@ from langchain_core.messages import (
     BaseMessage,
     HumanMessage,
     SystemMessage,
+    trim_messages,
 )
 from langgraph.graph import END, START, StateGraph
 
@@ -88,9 +97,18 @@ _RESPONSE_SYSTEM_PROMPT: str = (
     "Rules:\n"
     "- Never invent product details, prices, ratings, or URLs. If the "
     "data does not contain an answer, say so plainly.\n"
-    "- If the user asked for products, present the most relevant ones as "
-    "a short bulleted list showing title, price in PKR, and rating when "
-    "available. Do not list more than 5 products.\n"
+    "- When the user asked for products (or you are recommending products), "
+    "present the most relevant ones as a short bulleted list. Each bullet "
+    "MUST include the product's full URL as a markdown link so the user "
+    "can click through. Use this exact format:\n"
+    "    - [Product Title](https://www.daraz.pk/products/...html) - Rs. 1,234\n"
+    "  The URL comes from the product's `url` field in the data. Never "
+    "shorten it, never invent it, never write it as bare text. If a "
+    "product has no `url` field, skip that product rather than emit a "
+    "bullet without a link.\n"
+    "- For rating: only include 'Rating: X.X' when the data has a non-null "
+    "`rating` field. Do not print 'Rating: null'.\n"
+    "- Do not list more than 5 products.\n"
     "- If an error occurred, apologise briefly and describe what went "
     "wrong in plain language.\n"
     "- Prices are in PKR. Format them as 'Rs. 1,234'.\n"
@@ -102,6 +120,12 @@ _RESPONSE_SYSTEM_PROMPT: str = (
 #: dumping all of them wastes tokens and slows the LLM without improving
 #: the reply. The LLM only needs enough context to summarise.
 _MAX_TOOL_RESULT_CHARS: int = 8000
+
+#: Maximum number of messages fed to either LLM call. Each turn
+#: contributes one HumanMessage and one AIMessage, so 16 messages equals
+#: the last eight turns. History is still stored in full by the
+#: checkpointer; only the window sent to the model is capped.
+_MAX_CONTEXT_MESSAGES: int = 16
 
 # ---------------------------------------------------------------------- #
 # LLM construction
@@ -163,32 +187,56 @@ def _content_to_str(message: BaseMessage) -> str:
         return str(text) if text is not None else ""
     return ""
 
-def _last_human_message(state: AgentState) -> str:
-    """Return the text of the most recent human message in the state.
+def _trim_for_llm(messages: Sequence[BaseMessage]) -> list[BaseMessage]:
+    """Return the trailing window of ``messages`` for the LLM.
+
+    Keeps the last ``_MAX_CONTEXT_MESSAGES`` messages, starting on a
+    HumanMessage so the model sees a clean turn boundary. System messages
+    are not included -- the caller adds its own.
+
+    The parameter is typed as ``Sequence`` rather than ``list`` so that
+    callers can pass LangGraph's ``list[AnyMessage]`` without a cast --
+    ``list`` is invariant, ``Sequence`` is covariant.
 
     Args:
-        state: The graph state.
+        messages: The full conversation from ``AgentState.messages``.
 
     Returns:
-        The user's message text, or an empty string if none is present.
+        A trimmed list of Human/AI messages.
     """
-    for message in reversed(state["messages"]):
-        if isinstance(message, HumanMessage):
-            return _content_to_str(message)
-    return ""
+    if not messages:
+        return []
+    trimmed = trim_messages(
+        list(messages),
+        max_tokens=_MAX_CONTEXT_MESSAGES,
+        strategy="last",
+        token_counter=len,
+        start_on="human",
+        include_system=False,
+        allow_partial=False,
+    )
+    return list(trimmed)
 
 # ---------------------------------------------------------------------- #
 # Graph construction
 # ---------------------------------------------------------------------- #
-def build_graph(llm: BaseChatModel | None = None) -> Any:
+def build_graph(
+    llm: BaseChatModel | None = None,
+    *,
+    checkpointer: Any | None = None,
+) -> Any:
     """Build and compile the agent graph.
 
     Args:
         llm: Optional chat model to use. When ``None``, ``_default_llm()``
             is called. Tests inject a mock here so no LLM call is made.
+        checkpointer: Optional LangGraph checkpointer. When provided, the
+            compiled graph persists state per ``thread_id`` so successive
+            turns in the same conversation see the prior history.
 
     Returns:
-        A compiled LangGraph ``StateGraph`` ready for ``ainvoke``.
+        A compiled LangGraph ``StateGraph`` ready for ``ainvoke`` or
+        ``astream_events``.
     """
     resolved_llm: BaseChatModel = llm if llm is not None else _default_llm()
 
@@ -197,14 +245,11 @@ def build_graph(llm: BaseChatModel | None = None) -> Any:
     # ------------------------------------------------------------------ #
     async def _parse_intent_node(state: AgentState) -> dict[str, Any]:
         """Classify the user's message into a ParsedIntent."""
-        user_text = _last_human_message(state)
+        trimmed = _trim_for_llm(state["messages"])
         structured_llm = resolved_llm.with_structured_output(ParsedIntent)
         try:
             intent = await structured_llm.ainvoke(
-                [
-                    SystemMessage(content=_INTENT_SYSTEM_PROMPT),
-                    HumanMessage(content=user_text),
-                ]
+                [SystemMessage(content=_INTENT_SYSTEM_PROMPT), *trimmed]
             )
             if not isinstance(intent, ParsedIntent):
                 intent = ParsedIntent.model_validate(intent)
@@ -272,7 +317,6 @@ def build_graph(llm: BaseChatModel | None = None) -> Any:
 
     async def _respond_node(state: AgentState) -> dict[str, Any]:
         """Generate the final assistant reply using the tool result."""
-        user_text = _last_human_message(state)
         intent = state.get("intent")
         tool_result = state.get("tool_result")
         error = state.get("error")
@@ -290,13 +334,20 @@ def build_graph(llm: BaseChatModel | None = None) -> Any:
         if not context_parts:
             context_parts.append("No data available.")
 
+        # Prior conversation is passed to the LLM as context so follow-up
+        # turns ("tell me more about the second one") are intelligible.
+        # The most recent HumanMessage is the user's current question --
+        # the LLM sees it in the trimmed history, so it is not repeated.
+        trimmed = _trim_for_llm(state["messages"])
+
         prompt = [
             SystemMessage(content=_RESPONSE_SYSTEM_PROMPT),
+            *trimmed,
             HumanMessage(
                 content=(
-                    f"User asked: {user_text}\n\n"
-                    f"Context:\n" + "\n\n".join(context_parts) + "\n\n"
-                    "Write the reply."
+                    "Context for the reply (not visible to the user):\n\n"
+                    + "\n\n".join(context_parts) + "\n\n"
+                    "Write the reply now."
                 )
             ),
         ]
@@ -366,6 +417,8 @@ def build_graph(llm: BaseChatModel | None = None) -> Any:
     builder.add_edge("get_recommendations", "respond")
     builder.add_edge("respond", END)
 
+    if checkpointer is not None:
+        return builder.compile(checkpointer=checkpointer)
     return builder.compile()
 
 # ---------------------------------------------------------------------- #
@@ -373,11 +426,35 @@ def build_graph(llm: BaseChatModel | None = None) -> Any:
 # ---------------------------------------------------------------------- #
 _compiled_graph: Any | None = None
 
+def warm_compiled_graph(*, checkpointer: Any) -> Any:
+    """Build and cache the compiled graph with a checkpointer bound.
+
+    Called once from the FastAPI lifespan so the process-wide graph
+    carries the checkpointer. Idempotent: if the graph is already
+    compiled, this is a no-op and the existing instance is returned.
+
+    Args:
+        checkpointer: A LangGraph checkpointer (MemorySaver, SqliteSaver,
+            or any object implementing the checkpointer protocol).
+
+    Returns:
+        The shared compiled graph.
+    """
+    global _compiled_graph
+    if _compiled_graph is None:
+        _compiled_graph = build_graph(checkpointer=checkpointer)
+    return _compiled_graph
+
 def get_compiled_graph() -> Any:
     """Return a lazily-constructed, process-wide compiled graph.
 
     Building the graph is cheap; constructing the LLM client is not. The
     cache means the FastAPI process only pays that cost once.
+
+    If :func:`warm_compiled_graph` was not called (e.g. from a script or
+    a test that does not use the FastAPI lifespan), a graph without a
+    checkpointer is built. In that case conversation state is not
+    persisted across turns.
 
     Returns:
         The shared compiled graph.
@@ -387,4 +464,18 @@ def get_compiled_graph() -> Any:
         _compiled_graph = build_graph()
     return _compiled_graph
 
-__all__ = ["build_graph", "get_compiled_graph"]
+def reset_compiled_graph() -> None:
+    """Clear the cached compiled graph.
+
+    Intended for tests that need to rebuild the graph between cases.
+    Not used by production code.
+    """
+    global _compiled_graph
+    _compiled_graph = None
+
+__all__ = [
+    "build_graph",
+    "get_compiled_graph",
+    "reset_compiled_graph",
+    "warm_compiled_graph",
+]
