@@ -37,10 +37,9 @@ from daraz_ai_shopping_assistant.services.product_service import ProductService
 
 @pytest.fixture()
 def mock_product_service() -> MagicMock:
-    """Return a mocked ProductService with async methods."""
+    """Return a mocked ProductService with an async get_product method."""
     service = MagicMock(spec=ProductService)
     service.get_product = AsyncMock()
-    service.get_recommendations = AsyncMock()
     return service
 
 @pytest.fixture()
@@ -52,7 +51,7 @@ def client(mock_product_service: MagicMock) -> Iterator[TestClient]:
     app.dependency_overrides.clear()
 
 # ---------------------------------------------------------------------- #
-# Error mapping -- product endpoint
+# Error mapping
 # ---------------------------------------------------------------------- #
 def test_invalid_request_returns_400(
     client: TestClient, mock_product_service: MagicMock
@@ -123,26 +122,3 @@ def test_error_response_does_not_leak_context(
     assert set(response.json().keys()) == {"detail"}
     assert "secret" not in response.text
     assert "upstream_status" not in response.text
-
-# ---------------------------------------------------------------------- #
-# Error mapping -- recommendations endpoint
-# ---------------------------------------------------------------------- #
-def test_recommendations_not_found_returns_404(
-    client: TestClient, mock_product_service: MagicMock
-) -> None:
-    """A missing product propagates to 404 on the recommendations endpoint."""
-    mock_product_service.get_recommendations.side_effect = ProductNotFoundError(
-        "not found"
-    )
-    response = client.get("/api/v1/products/i999/recommendations")
-    assert response.status_code == 404
-
-def test_recommendations_parse_error_returns_502(
-    client: TestClient, mock_product_service: MagicMock
-) -> None:
-    """A ParseError on recommendations maps to 502."""
-    mock_product_service.get_recommendations.side_effect = ParseError(
-        "bad payload", source="product"
-    )
-    response = client.get("/api/v1/products/i1959941878/recommendations")
-    assert response.status_code == 502

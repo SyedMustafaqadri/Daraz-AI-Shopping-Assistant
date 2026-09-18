@@ -119,34 +119,6 @@ async def test_get_product_intent_routes_to_product_node() -> None:
     assert final["tool_result"]["id"] == "i1959941878"
 
 # ---------------------------------------------------------------------- #
-# Recommendations routing
-# ---------------------------------------------------------------------- #
-@pytest.mark.asyncio()
-async def test_get_recommendations_intent_routes_to_recs_node() -> None:
-    """A 'get_recommendations' intent calls the recommendation tool."""
-    llm = FakeLLM(
-        ParsedIntent(intent=IntentType.GET_RECOMMENDATIONS, product_id="i1"),
-        reply_text="Similar products below.",
-    )
-    graph = build_graph(llm=llm)
-
-    with patch(
-        "daraz_ai_shopping_assistant.agents.graph.get_recommendations_tool",
-        new=AsyncMock(return_value={"product_id": "i1", "recommendations": []}),
-    ) as mock_recs:
-        final = await graph.ainvoke(
-            {
-                "messages": [__import__("langchain_core.messages", fromlist=["HumanMessage"]).HumanMessage(content="similar to i1")],
-                "intent": None,
-                "tool_result": None,
-                "error": None,
-            }
-        )
-
-    mock_recs.assert_awaited_once_with("i1")
-    assert final["tool_result"]["product_id"] == "i1"
-
-# ---------------------------------------------------------------------- #
 # Small talk bypasses tools
 # ---------------------------------------------------------------------- #
 @pytest.mark.asyncio()
@@ -167,10 +139,6 @@ async def test_small_talk_skips_tools() -> None:
             "daraz_ai_shopping_assistant.agents.graph.get_product_tool",
             new=AsyncMock(),
         ) as mock_product,
-        patch(
-            "daraz_ai_shopping_assistant.agents.graph.get_recommendations_tool",
-            new=AsyncMock(),
-        ) as mock_recs,
     ):
         final = await graph.ainvoke(
             {
@@ -183,7 +151,6 @@ async def test_small_talk_skips_tools() -> None:
 
     mock_search.assert_not_awaited()
     mock_product.assert_not_awaited()
-    mock_recs.assert_not_awaited()
     assert final["tool_result"] is None
 
 # ---------------------------------------------------------------------- #

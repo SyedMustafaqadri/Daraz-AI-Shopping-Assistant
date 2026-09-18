@@ -4,6 +4,7 @@
 <head>
   <meta charset="utf-8">
   <title>Daraz Voice -- manual test</title>
+  <link rel="icon" href="data:,">
   <style>
     body {
       font-family: system-ui, sans-serif;
@@ -78,6 +79,12 @@
   <h1>Daraz Voice -- manual test</h1>
   <p>Speak into the microphone. The assistant will transcribe, search, and speak the reply.</p>
 
+  <label for="mode" style="margin-right: 0.5rem;">Mode:</label>
+  <select id="mode" style="padding: 0.4rem; margin-right: 1rem;">
+    <option value="sandwich">Sandwich (Deepgram + ElevenLabs)</option>
+    <option value="live">Live (Gemini audio-to-audio)</option>
+  </select>
+
   <button id="start">Start session</button>
   <button id="stop" disabled>Stop</button>
 
@@ -89,10 +96,15 @@
   <script>
     // ----------------------------------------------------------------------
     // Config -- must match the server's config for sample rates.
+    //
+    // Both modes use the same rates:
+    //   browser -> server : PCM16 mono, 16 kHz
+    //   server -> browser : PCM16 mono, 24 kHz
+    // Gemini Live and ElevenLabs both return 24 kHz PCM16.
     // ----------------------------------------------------------------------
     const STT_SAMPLE_RATE = 16000;   // browser -> server (PCM16 mono)
     const TTS_SAMPLE_RATE = 24000;   // server -> browser (PCM16 mono)
-    const WS_URL = `ws://${location.hostname}:8000/api/v1/voice/ws`;
+    const backendPort = new URLSearchParams(location.search).get('backendPort') || '8000';
 
     // ----------------------------------------------------------------------
     // State
@@ -192,7 +204,16 @@ registerProcessor('pcm16-sender', PCM16Sender);
       document.getElementById('start').disabled = true;
       document.getElementById('stop').disabled = false;
 
-      ws = new WebSocket(WS_URL);
+      const mode = document.getElementById('mode').value;
+      const path = mode === 'live'
+        ? '/api/v1/voice/live/ws'
+        : '/api/v1/voice/ws';
+      const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const hostname = location.hostname || '127.0.0.1';
+      const url = `${protocol}//${hostname}:${backendPort}${path}`;
+      log(`[ws] connecting mode=${mode} url=${url}`);
+
+      ws = new WebSocket(url);
       ws.binaryType = 'arraybuffer';
 
       ws.onopen = async () => {
@@ -217,6 +238,8 @@ registerProcessor('pcm16-sender', PCM16Sender);
     }
 
     function handleJson(msg) {
+      // Heartbeat ping -- invisible to the log.
+      if (msg.type === 'ping') return;
       log(`[json] ${JSON.stringify(msg).slice(0, 200)}`);
       if (msg.type === 'transcript_interim') {
         document.getElementById('transcript').textContent = msg.text + ' ...';

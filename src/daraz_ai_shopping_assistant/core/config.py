@@ -242,6 +242,27 @@ class Settings(BaseSettings):
     )
 
     # ------------------------------------------------------------------ #
+    # Voice -- Gemini Live
+    # ------------------------------------------------------------------ #
+    llm_live_model: str = Field(
+        default="gemini-3.8-live",
+        description=(
+            "Gemini Live model identifier for the audio-to-audio voice "
+            "endpoint. Loaded from LLM_LIVE_MODEL. The stable 3.8 model "
+            "code is 'gemini-3.8-live'; the high-reasoning variant is "
+            "'gemini-3.8-live-extended-thinking'. Do NOT set "
+            "thinking_level for the standard model."
+        ),
+    )
+    gemini_live_voice: str = Field(
+        default="Kore",
+        description=(
+            "Prebuilt voice name for the Live session. 'Kore' is neutral "
+            "and clean; other options include 'Puck', 'Charon', and 'Fenrir'."
+        ),
+    )
+
+    # ------------------------------------------------------------------ #
     # Logging
     # ------------------------------------------------------------------ #
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = Field(

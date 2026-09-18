@@ -13,13 +13,9 @@ The service is the ONLY layer that:
     - converts a Pydantic ValidationError into a typed ParseError,
     - normalises small LLM quirks on the way out (see _normalise_product_id),
     - emits the PRODUCT_FETCH_* lifecycle events,
-    - reads from and writes to the local scrape store,
-    - exposes the recommendations list from the product payload.
+    - reads from and writes to the local scrape store.
 
-Unlike the search service, this service does not need pagination or
-filters. It also does not need a separate endpoint for recommendations --
-Daraz renders the recommendation carousel on the same product page, so
-that data is already inside the product payload.
+Unlike the search service, this service does not need pagination or filters.
 """
 
 from __future__ import annotations
@@ -38,7 +34,6 @@ from daraz_ai_shopping_assistant.core.exceptions import (
 )
 from daraz_ai_shopping_assistant.core.logging import get_logger
 from daraz_ai_shopping_assistant.models.product import ProductDetails
-from daraz_ai_shopping_assistant.models.recommendation import Recommendation
 from daraz_ai_shopping_assistant.scrapers.base import DarazScraper
 from daraz_ai_shopping_assistant.scrapers.daraz import FirecrawlDarazScraper
 from daraz_ai_shopping_assistant.storage.json_store import ScrapeStore
@@ -201,34 +196,6 @@ class ProductService:
             )
 
         return product
-
-    async def get_recommendations(self, product_id: str) -> list[Recommendation]:
-        """Return Daraz's recommendations for a product.
-
-        Recommendations are a nested field of the product payload -- Daraz
-        renders the carousel on the same page. No second Firecrawl call is
-        made (see Specification.md Section 15).
-
-        Args:
-            product_id: Daraz product identifier.
-
-        Returns:
-            The recommendation list, possibly empty.
-
-        Raises:
-            Same exceptions as ``get_product``.
-        """
-        product = await self.get_product(product_id)
-        logger.info(
-            "RECOMMENDATIONS_EXTRACTED",
-            extra={
-                "ctx": {
-                    "product_id": product_id,
-                    "count": len(product.recommendations),
-                }
-            },
-        )
-        return list(product.recommendations)
 
     # ------------------------------------------------------------------ #
     # Internals

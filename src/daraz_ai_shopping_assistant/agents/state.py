@@ -32,7 +32,6 @@ class IntentType(StrEnum):
 
     SEARCH = "search"
     GET_PRODUCT = "get_product"
-    GET_RECOMMENDATIONS = "get_recommendations"
     SMALL_TALK = "small_talk"
 
 class ParsedIntent(BaseModel):
@@ -56,7 +55,7 @@ class ParsedIntent(BaseModel):
         default=None,
         description=(
             "Daraz product identifier, 'i' followed by digits "
-            "(for intent='get_product' or 'get_recommendations')."
+            "(for intent='get_product')."
         ),
     )
     min_price: float | None = Field(

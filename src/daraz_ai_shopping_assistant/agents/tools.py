@@ -75,33 +75,7 @@ async def get_product_tool(product_id: str) -> dict[str, Any]:
     product = await service.get_product(product_id)
     return product.model_dump(mode="json")
 
-async def get_recommendations_tool(product_id: str) -> dict[str, Any]:
-    """Fetch Daraz's recommendations for a product.
-
-    Args:
-        product_id: Daraz product identifier.
-
-    Returns:
-        A dict with a single ``recommendations`` key whose value is a list
-        of JSON-serialisable recommendation dicts. Wrapping in a dict keeps
-        the tool's return type uniform with the others.
-
-    Raises:
-        DarazScraperError: On any upstream failure, or when the product is
-            not found.
-    """
-    logger.info(
-        "AGENT_TOOL_GET_RECOMMENDATIONS", extra={"ctx": {"product_id": product_id}}
-    )
-    service = get_product_service()
-    recommendations = await service.get_recommendations(product_id)
-    return {
-        "product_id": product_id,
-        "recommendations": [r.model_dump(mode="json") for r in recommendations],
-    }
-
 __all__ = [
     "get_product_tool",
-    "get_recommendations_tool",
     "search_products_tool",
 ]

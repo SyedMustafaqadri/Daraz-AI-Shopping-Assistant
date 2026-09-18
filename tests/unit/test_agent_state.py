@@ -12,11 +12,10 @@ from daraz_ai_shopping_assistant.agents.state import (
 
 
 def test_intent_type_values() -> None:
-    """IntentType exposes exactly the four documented intents."""
+    """IntentType exposes exactly the three documented intents."""
     assert {member.value for member in IntentType} == {
         "search",
         "get_product",
-        "get_recommendations",
         "small_talk",
     }
 

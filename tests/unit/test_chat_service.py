@@ -262,13 +262,6 @@ def test_curate_get_product_missing_id_returns_empty() -> None:
     intent = ParsedIntent(intent=IntentType.GET_PRODUCT, product_id="i1")
     assert _curate_recommended_products(intent, {"title": "x"}) == []
 
-def test_curate_get_recommendations_limits_to_five() -> None:
-    """The recommendations branch caps at five items."""
-    recs = [{"id": f"i{i}"} for i in range(20)]
-    intent = ParsedIntent(intent=IntentType.GET_RECOMMENDATIONS, product_id="i1")
-    result = _curate_recommended_products(intent, {"recommendations": recs})
-    assert len(result) == 5
-
 def test_curate_small_talk_returns_empty() -> None:
     """Small talk has no products to recommend."""
     intent = ParsedIntent(intent=IntentType.SMALL_TALK)

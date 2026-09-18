@@ -349,14 +349,12 @@ class ChatService:
             if kind == "on_chain_start" and node in (
                 "search",
                 "get_product",
-                "get_recommendations",
             ):
                 yield {"type": "tool_started", "tool": node}
                 continue
             if kind == "on_chain_end" and node in (
                 "search",
                 "get_product",
-                "get_recommendations",
             ):
                 yield {"type": "tool_done", "tool": node}
                 continue
@@ -482,10 +480,6 @@ def _curate_recommended_products(
         if isinstance(tool_result, dict) and tool_result.get("id"):
             return [tool_result]
         return []
-
-    if intent_value == "get_recommendations":
-        recs = tool_result.get("recommendations") or []
-        return [r for r in recs[:limit] if isinstance(r, dict)]
 
     return []
 

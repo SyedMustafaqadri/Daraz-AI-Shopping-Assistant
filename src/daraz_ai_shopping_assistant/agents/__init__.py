@@ -7,7 +7,7 @@ service layer -- tools call services, never scrapers.
 Public API:
     - AgentState, ParsedIntent, IntentType -- the graph's typed state.
     - build_graph, get_compiled_graph -- graph construction.
-    - The three tool functions in agents.tools.
+    - The tool functions in agents.tools.
 """
 
 from __future__ import annotations
@@ -23,7 +23,6 @@ from daraz_ai_shopping_assistant.agents.state import (
 )
 from daraz_ai_shopping_assistant.agents.tools import (
     get_product_tool,
-    get_recommendations_tool,
     search_products_tool,
 )
 
@@ -34,6 +33,5 @@ __all__ = [
     "build_graph",
     "get_compiled_graph",
     "get_product_tool",
-    "get_recommendations_tool",
     "search_products_tool",
 ]

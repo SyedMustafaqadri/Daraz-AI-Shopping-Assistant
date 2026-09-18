@@ -504,6 +504,7 @@ source = { editable = "." }
 dependencies = [
     { name = "fastapi" },
     { name = "firecrawl-py" },
+    { name = "google-genai" },
     { name = "httpx" },
     { name = "langchain-core" },
     { name = "langchain-google-genai" },
@@ -530,6 +531,7 @@ dev = [
 requires-dist = [
     { name = "fastapi", specifier = ">=0.141.1" },
     { name = "firecrawl-py", specifier = ">=4.43.0" },
+    { name = "google-genai", specifier = ">=1.0.0" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "langchain-core", specifier = ">=1.6.3" },
     { name = "langchain-google-genai", specifier = ">=4.4.0" },

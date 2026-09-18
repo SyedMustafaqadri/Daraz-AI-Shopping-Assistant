@@ -1,13 +1,12 @@
 """LangGraph state machine for the chat pipeline.
 
-The graph has five nodes:
+The graph has four nodes:
 
     - ``parse_intent``   -- LLM classifies the user's message and extracts
                             parameters. Uses structured output so the
                             result is a typed ParsedIntent, not free text.
     - ``search``         -- calls search_products_tool.
     - ``get_product``    -- calls get_product_tool.
-    - ``get_recommendations`` -- calls get_recommendations_tool.
     - ``respond``        -- LLM writes a plain-language reply using the
                             original question and whatever the tool
                             returned.
@@ -62,7 +61,6 @@ from daraz_ai_shopping_assistant.agents.state import (
 )
 from daraz_ai_shopping_assistant.agents.tools import (
     get_product_tool,
-    get_recommendations_tool,
     search_products_tool,
 )
 from daraz_ai_shopping_assistant.core.config import settings
@@ -86,8 +84,6 @@ _INTENT_SYSTEM_PROMPT: str = (
     "- get_product: the user asked for details of a specific product and "
     "provided its id. Extract: product_id (must be 'i' followed by "
     "digits, e.g. 'i927677133').\n"
-    "- get_recommendations: the user asked for products similar to a "
-    "specific product and provided its id. Extract: product_id.\n"
     "- small_talk: greetings, thanks, chitchat, or anything that does not "
     "fit the above. No parameters.\n"
     "\n"
@@ -343,21 +339,6 @@ def build_graph(
             )
             return {"error": exc.message}
 
-    async def _get_recommendations_node(state: AgentState) -> dict[str, Any]:
-        """Execute the recommendations tool and record the result."""
-        intent = state["intent"]
-        if intent is None or not intent.product_id:
-            return {"error": "Product ID was not provided."}
-        try:
-            result = await get_recommendations_tool(intent.product_id)
-            return {"tool_result": result}
-        except DarazScraperError as exc:
-            logger.warning(
-                "AGENT_TOOL_FAILED",
-                extra={"ctx": {"tool": "get_recommendations", "error": exc.message}},
-            )
-            return {"error": exc.message}
-
     async def _respond_node(state: AgentState) -> dict[str, Any]:
         """Generate the final assistant reply using the tool result."""
         intent = state.get("intent")
@@ -429,7 +410,6 @@ def build_graph(
         mapping = {
             IntentType.SEARCH: "search",
             IntentType.GET_PRODUCT: "get_product",
-            IntentType.GET_RECOMMENDATIONS: "get_recommendations",
             IntentType.SMALL_TALK: "respond",
         }
         return mapping.get(intent.intent, "respond")
@@ -441,7 +421,6 @@ def build_graph(
     builder.add_node("parse_intent", _parse_intent_node)
     builder.add_node("search", _search_node)
     builder.add_node("get_product", _get_product_node)
-    builder.add_node("get_recommendations", _get_recommendations_node)
     builder.add_node("respond", _respond_node)
 
     builder.add_edge(START, "parse_intent")
@@ -451,13 +430,11 @@ def build_graph(
         {
             "search": "search",
             "get_product": "get_product",
-            "get_recommendations": "get_recommendations",
             "respond": "respond",
         },
     )
     builder.add_edge("search", "respond")
     builder.add_edge("get_product", "respond")
-    builder.add_edge("get_recommendations", "respond")
     builder.add_edge("respond", END)
 
     if checkpointer is not None:

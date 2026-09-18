@@ -16,6 +16,7 @@ Router inclusion order is significant:
     - ``products_router`` is included SECOND.
     - ``chat_router`` has its own prefix and does not collide.
     - ``voice_router`` exposes ``/voice/ws`` and does not collide.
+    - ``voice_live_router`` exposes ``/voice/live/ws`` and does not collide.
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ from daraz_ai_shopping_assistant.api.chat import router as chat_router
 from daraz_ai_shopping_assistant.api.products import router as products_router
 from daraz_ai_shopping_assistant.api.search import router as search_router
 from daraz_ai_shopping_assistant.api.voice import router as voice_router
+from daraz_ai_shopping_assistant.api.voice_live import router as voice_live_router
 
 api_router: APIRouter = APIRouter()
 
@@ -34,5 +36,6 @@ api_router.include_router(search_router)
 api_router.include_router(products_router)
 api_router.include_router(chat_router)
 api_router.include_router(voice_router)
+api_router.include_router(voice_live_router)
 
 __all__ = ["api_router"]

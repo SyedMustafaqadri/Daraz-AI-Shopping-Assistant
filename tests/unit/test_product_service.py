@@ -7,7 +7,6 @@ The scraper is mocked, so these tests never touch the network. They cover:
     - invalid payload -> ParseError,
     - ID validation (empty, wrong format, whitespace),
     - typed scraper errors propagating unchanged,
-    - recommendations being extracted from the same payload,
     - lifecycle log events.
 """
 
@@ -54,19 +53,6 @@ def _valid_payload() -> dict[str, object]:
         "availability": "In Stock",
         "variants": [{"name": "Black", "price": 579.0, "available": True}],
         "reviews": [{"rating": 5.0, "comment": "Great!", "author": "Ali"}],
-        "recommendations": [
-            {
-                "id": "i999",
-                "title": "Another Mouse",
-                "url": "https://www.daraz.pk/products/i999.html",
-                "price": 799.0,
-            },
-            {
-                "id": "i1000",
-                "title": "Yet Another Mouse",
-                "url": "https://www.daraz.pk/products/i1000.html",
-            },
-        ],
     }
 
 def _make_scraper(payload: dict[str, object] | None) -> MagicMock:
@@ -102,7 +88,6 @@ async def test_get_product_happy_path() -> None:
     assert product.availability == "In Stock"
     assert len(product.variants) == 1
     assert len(product.reviews) == 1
-    assert len(product.recommendations) == 2
 
     scraper.fetch_product_payload.assert_awaited_once_with("i1959941878")
 
@@ -135,7 +120,6 @@ async def test_get_product_preserves_null_fields() -> None:
     assert product.discount_percentage is None
     assert product.description is None
     assert product.availability is None
-    assert product.recommendations == []
 
 # ---------------------------------------------------------------------- #
 # Not found
@@ -241,48 +225,6 @@ async def test_get_product_propagates_generic_scraper_error() -> None:
         await service.get_product("i1959941878")
 
 # ---------------------------------------------------------------------- #
-# Recommendations
-# ---------------------------------------------------------------------- #
-@pytest.mark.asyncio()
-async def test_get_recommendations_returns_list() -> None:
-    """Recommendations are pulled from the product payload."""
-    scraper = _make_scraper(_valid_payload())
-    service = ProductService(scraper=scraper)
-
-    recs = await service.get_recommendations("i1959941878")
-
-    assert len(recs) == 2
-    assert recs[0].id == "i999"
-    assert recs[1].id == "i1000"
-    # The scraper is called exactly once -- recommendations are nested.
-    scraper.fetch_product_payload.assert_awaited_once_with("i1959941878")
-
-@pytest.mark.asyncio()
-async def test_get_recommendations_empty_when_absent() -> None:
-    """A product with no recommendations returns an empty list."""
-    scraper = _make_scraper(
-        {
-            "id": "i111",
-            "title": "Sparse",
-            "url": "https://www.daraz.pk/products/i111.html",
-            "price": 100.0,
-        }
-    )
-    service = ProductService(scraper=scraper)
-
-    recs = await service.get_recommendations("i111")
-
-    assert recs == []
-
-@pytest.mark.asyncio()
-async def test_get_recommendations_raises_when_product_not_found() -> None:
-    """An empty payload propagates ProductNotFoundError through recommendations."""
-    service = ProductService(scraper=_make_scraper({}))
-
-    with pytest.raises(ProductNotFoundError):
-        await service.get_recommendations("i111")
-
-# ---------------------------------------------------------------------- #
 # Logging
 # ---------------------------------------------------------------------- #
 @pytest.mark.asyncio()
@@ -300,18 +242,3 @@ async def test_get_product_emits_lifecycle_events(
     messages = {r.message for r in caplog.records}
     assert "PRODUCT_FETCH_STARTED" in messages
     assert "PRODUCT_FETCH_COMPLETED" in messages
-
-@pytest.mark.asyncio()
-async def test_get_recommendations_emits_event(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """RECOMMENDATIONS_EXTRACTED is emitted."""
-    service = ProductService(scraper=_make_scraper(_valid_payload()))
-
-    with caplog.at_level(
-        "INFO", logger="daraz_ai_shopping_assistant.services.product_service"
-    ):
-        await service.get_recommendations("i1959941878")
-
-    messages = {r.message for r in caplog.records}
-    assert "RECOMMENDATIONS_EXTRACTED" in messages

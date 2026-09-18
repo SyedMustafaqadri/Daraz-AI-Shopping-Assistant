@@ -35,7 +35,6 @@ logger = get_logger(__name__)
 _FILLER_PHRASES: Final[dict[str, str]] = {
     "search": "Let me look that up.",
     "get_product": "One moment please.",
-    "get_recommendations": "Let me find some similar items.",
     "error": "Sorry, something went wrong.",
     # Played once, a few seconds after the primary filler, when the
     # tool call has not returned yet. Kept generic because it fires
@@ -65,7 +64,7 @@ class FillerCache:
 
         Args:
             intent: The intent name (``search``, ``get_product``,
-                ``get_recommendations``, ``error``, ``followup``).
+                ``error``, ``followup``).
 
         Returns:
             Raw PCM bytes, or ``None`` when no filler is cached for that

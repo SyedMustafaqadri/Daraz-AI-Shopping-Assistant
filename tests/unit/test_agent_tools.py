@@ -16,7 +16,6 @@ import pytest
 
 from daraz_ai_shopping_assistant.agents.tools import (
     get_product_tool,
-    get_recommendations_tool,
     search_products_tool,
 )
 from daraz_ai_shopping_assistant.core.exceptions import (
@@ -24,7 +23,6 @@ from daraz_ai_shopping_assistant.core.exceptions import (
     ScraperTimeoutError,
 )
 from daraz_ai_shopping_assistant.models.product import ProductDetails
-from daraz_ai_shopping_assistant.models.recommendation import Recommendation
 from daraz_ai_shopping_assistant.models.search import SearchResult
 from daraz_ai_shopping_assistant.utils.datetime import pkt_now
 
@@ -41,16 +39,6 @@ def _product_details() -> ProductDetails:
         url="https://www.daraz.pk/products/i1959941878.html",
         price=100.0,
     )
-
-def _recommendations() -> list[Recommendation]:
-    """Return a small recommendation list for mocking."""
-    return [
-        Recommendation(
-            id="i999",
-            title="Another Mouse",
-            url="https://www.daraz.pk/products/i999.html",
-        )
-    ]
 
 # ---------------------------------------------------------------------- #
 # search_products_tool
@@ -111,33 +99,3 @@ async def test_get_product_tool_propagates_not_found() -> None:
         return_value=service,
     ), pytest.raises(ProductNotFoundError):
         await get_product_tool("i999")
-
-# ---------------------------------------------------------------------- #
-# get_recommendations_tool
-# ---------------------------------------------------------------------- #
-@pytest.mark.asyncio()
-async def test_recommendations_tool_wraps_list() -> None:
-    """The tool wraps the recommendation list in a dict."""
-    service = MagicMock()
-    service.get_recommendations = AsyncMock(return_value=_recommendations())
-    with patch(
-        "daraz_ai_shopping_assistant.agents.tools.get_product_service",
-        return_value=service,
-    ):
-        result = await get_recommendations_tool("i1959941878")
-    assert result["product_id"] == "i1959941878"
-    assert isinstance(result["recommendations"], list)
-    assert len(result["recommendations"]) == 1
-    assert result["recommendations"][0]["id"] == "i999"
-
-@pytest.mark.asyncio()
-async def test_recommendations_tool_empty_list() -> None:
-    """An empty recommendation list is wrapped correctly."""
-    service = MagicMock()
-    service.get_recommendations = AsyncMock(return_value=[])
-    with patch(
-        "daraz_ai_shopping_assistant.agents.tools.get_product_service",
-        return_value=service,
-    ):
-        result = await get_recommendations_tool("i1")
-    assert result == {"product_id": "i1", "recommendations": []}

@@ -87,7 +87,7 @@ _LOG_TEXT_PREVIEW: int = 60
 #: because they are the only ones that can take more than a couple of
 #: seconds to answer.
 _TOOL_INTENTS: frozenset[str] = frozenset(
-    {"search", "get_product", "get_recommendations"}
+    {"search", "get_product"}
 )
 
 @dataclass
