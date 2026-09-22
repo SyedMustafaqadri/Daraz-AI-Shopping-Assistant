@@ -263,6 +263,52 @@ class Settings(BaseSettings):
     )
 
     # ------------------------------------------------------------------ #
+    # Telnyx Conversation Relay
+    # ------------------------------------------------------------------ #
+    telnyx_api_key: str = Field(
+        default="",
+        description="Telnyx API key used for Call Control commands.",
+    )
+    telnyx_public_key: str = Field(
+        default="",
+        description=(
+            "Telnyx webhook public key reserved for signature verification "
+            "when the deployment enables the verifier."
+        ),
+    )
+    telnyx_connection_id: str = Field(
+        default="",
+        description="Telnyx Voice API connection identifier.",
+    )
+    telnyx_phone_number: str = Field(
+        default="",
+        description="Telnyx inbound number in E.164 format.",
+    )
+    telnyx_conversation_ws_url: str = Field(
+        default="",
+        description="Public wss:// URL for Telnyx Conversation Relay.",
+    )
+    telnyx_voice: str = Field(
+        default="Telnyx.Ultra.01eaafa9-308a-4276-a017-6ab0cf061b1f",
+        description="Telnyx Conversation Relay voice identifier.",
+    )
+    telnyx_language: str = Field(
+        default="en-US",
+        description="Conversation Relay language code.",
+    )
+    telnyx_transcription_engine: str = Field(
+        default="Deepgram",
+        description="Conversation Relay transcription engine.",
+    )
+    telnyx_greeting: str = Field(
+        default=(
+            "Hi, I am the Daraz shopping assistant. "
+            "Which product would you like to know about?"
+        ),
+        description="Greeting played when an inbound Telnyx call is answered.",
+    )
+
+    # ------------------------------------------------------------------ #
     # Logging
     # ------------------------------------------------------------------ #
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = Field(
