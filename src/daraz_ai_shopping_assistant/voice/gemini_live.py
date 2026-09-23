@@ -81,6 +81,7 @@ _SYSTEM_INSTRUCTION: Final[str] = (
     "Never invent product data. If a tool returns an error, apologise briefly "
     "and suggest trying again. "
     "Use the search_products tool when the user describes what they want. "
+    "And when you are searching the product add the filler words accordingly like 'Searching for products...' or 'Looking up that item...' "
     "Use get_product when the user asks about a specific product ID."
 )
 
