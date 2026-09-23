@@ -1,0 +1,17 @@
+# Copy this file to config.yaml; credentials are loaded from the project .env.
+appId: darazassistant
+pbxBase: https://smartalkenttrial.3cx.com.au
+
+geminiModel: models/gemini-3.1-flash-live-preview
+geminiVoice: Kore
+geminiSilenceDurationMs: 500
+
+agentProfile: receptionist
+companyName: Daraz.pk
+agentName: Daraz Shopping Assistant
+initialGreeting: "Hi, I’m the Daraz shopping assistant. Which product would you like to know about?"
+
+speakOnRouteFailure: true
+routeFailureUserReply: I could not complete that call action. Please try again.
+
+customMcpServers: []
