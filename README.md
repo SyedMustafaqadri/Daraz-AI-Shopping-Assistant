@@ -10,7 +10,6 @@ This project now includes:
 
 - deterministic Daraz product search via Firecrawl Markdown scraping
 - product detail retrieval using structured extraction plus Pydantic validation
-- recommendation extraction from the same product payload
 - a LangGraph-based chat endpoint with conversation memory
 - Server-Sent Events streaming for the chat endpoint
 - local JSON persistence of scrape payloads (search + product)
@@ -22,7 +21,7 @@ The service follows the project contract:
 
 - API route -> service -> scraper -> Firecrawl adapter -> Daraz.pk
 - search pages stay in deterministic Markdown parsing
-- product and recommendation pages use Firecrawl structured extraction validated by Pydantic
+- product pages use Firecrawl structured extraction validated by Pydantic
 - the chat layer runs only on top of validated service output and never invents product facts
 - successful scrape payloads are stored in a local JSON file and served on repeat requests
 
@@ -75,9 +74,12 @@ uv run uvicorn daraz_ai_shopping_assistant.main:app --reload --host 0.0.0.0 --po
 
 - GET  /api/v1/products/search
 - GET  /api/v1/products/{product_id}
-- GET  /api/v1/products/{product_id}/recommendations
 - POST /api/v1/chat           -- non-streaming JSON reply
 - POST /api/v1/chat/stream    -- Server-Sent Events token stream
+
+## 3CX phone agent
+
+This branch includes a Gemini Live voice service integrated with 3CX V20 Update 10+ Programmable Extensions. See [the 3CX setup guide](integrations/3cx-agentic-call-control/README.md) for environment variables, run commands, internal-call testing, and assigning a DID for calls from a mobile phone. The integration adds `search_products` and `get_product` tools that use this backend's validated Daraz data.
 
 ## Local scrape store
 
@@ -130,6 +132,3 @@ uv run mypy src
 - Search pages are parsed deterministically; product pages are not.
 - The LLM is bounded to intent routing and response generation; it does not
 bypass validation or source-of-truth services.
-- Every chat response includes a structured `recommended_products` list so
-clients can render the top results without parsing the LLM's prose.
-

@@ -106,27 +106,11 @@ GET /api/v1/products/i1959941878
 ```
 
 The response is a validated `ProductDetails` object, with nested seller,
-shipping, variants, reviews, and recommendations data when Daraz provides it.
+shipping, variants, and reviews data when Daraz provides it.
 
 **Local store:** A successful response is written to the local scrape store
 keyed by `product_id`. A repeat request returns the stored payload without
 calling Firecrawl, until the TTL (default 24 hours) expires.
-
----
-
-### `GET /api/v1/products/{product_id}/recommendations`
-
-Return the recommendation list from the same product payload. This does not
-trigger a second Firecrawl fetch. If the page has no recommendation carousel,
-the list is empty.
-
-Example:
-
-```
-GET /api/v1/products/i1959941878/recommendations
-```
-
-Returns a JSON array of `Recommendation` objects.
 
 ---
 
@@ -158,22 +142,6 @@ Response:
   "reply": "Here are some gaming mice under Rs. 5000: ...",
   "conversation_id": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
   "intent": "search",
-  "recommended_products": [
-    {
-      "id": "i1959941878",
-      "title": "RGB Gaming Mouse",
-      "url": "https://www.daraz.pk/products/7-i1959941878.html",
-      "price": 579.0,
-      "currency": "PKR"
-    },
-    {
-      "id": "i201116087",
-      "title": "Triple Mode High-Quality Wireless Bluetooth Gaming Mouse",
-      "url": "https://www.daraz.pk/products/6-3-24-i201116087.html",
-      "price": 997.0,
-      "currency": "PKR"
-    }
-  ],
   "data": { "search_query": "gaming mouse", "products": [ ... ] },
   "error": null
 }
@@ -185,25 +153,10 @@ Response fields:
 |---|---|---|
 | −`reply` | `string` | The assistant's natural-language reply. Always present. |
 | −`conversation_id` | `string` | Send this back on the next turn. Always present. |
-| −`intent` | `string | null` | `search`, `get_product`, `get_recommendations`, or `small_talk`. |
-| −`recommended_products` | `array<object>` | Top products the assistant is recommending. Empty for small-talk. |
+| −`intent` | `string | null` | `search`, `get_product`, or `small_talk`. |
 | −`data` | `object | null` | Raw tool result. Shape depends on `intent`. |
 | −`error` | `string | null` | Non-null only when a tool or the LLM failed. |
 ⚙
-
-**`recommended_products` semantics:**
-
-| Intent ↕▾ | Contents ↕▾ | Limit ↕▾ |
-|---|---|---|
-| −`search` | top products from the search result | 5 |
-| −`get_product` | the single product as a one-item list | 1 |
-| −`get_recommendations` | top recommendations from the tool result | 5 |
-| −`small_talk` | empty | -- |
-| −tool error | empty | -- |
-⚙
-
-The agent never invents product data; every entry in `recommended_products`
-comes from the same validated services that back the `/products` endpoints.
 
 ---
 
@@ -239,7 +192,7 @@ data: {"type": "token", "text": "some "}
 **Done event** -- once, after the stream completes:
 
 ```
-data: {"type": "done", "conversation_id": "7c9e6679-7425-40de-944b-e07fc1f90ae7", "intent": "search", "recommended_products": [ ... ], "error": null}
+data: {"type": "done", "conversation_id": "7c9e6679-7425-40de-944b-e07fc1f90ae7", "intent": "search", "error": null}
 ```
 
 **Terminal sentinel**:
@@ -272,4 +225,3 @@ data: [DONE]
 - FastAPI `422` handles malformed query/path input before application logic runs
 - conversation ids are echoed back on every chat response so clients can
 thread turns together
-

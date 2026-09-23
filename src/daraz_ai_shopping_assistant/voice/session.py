@@ -653,9 +653,6 @@ class VoiceSession:
                                     "type": "done",
                                     "conversation_id": event.get("conversation_id"),
                                     "intent": event.get("intent"),
-                                    "recommended_products": event.get(
-                                        "recommended_products", []
-                                    ),
                                     "error": event.get("error"),
                                 }
                             )

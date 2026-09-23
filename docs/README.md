@@ -6,7 +6,7 @@ Assistant — Backend**. The authoritative specification lives in
 [`../AGENTS.md`](../AGENTS.md).
 
 The implementation is active and verified through Phase 8: the backend includes
-search, product detail retrieval, recommendations, and a LangGraph-based chat
+search, product detail retrieval, and a LangGraph-based chat
 layer on top of the deterministic business services.
 
 > Read `Specification.md` first for the project contract. Use this folder to

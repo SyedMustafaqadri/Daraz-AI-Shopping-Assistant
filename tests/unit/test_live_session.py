@@ -100,20 +100,6 @@ async def test_execute_search_tool_caps_at_five_products(
     assert result["products"][0]["id"] == "i0"
 
 @pytest.mark.asyncio()
-async def test_execute_search_tool_tracks_recommended(
-    session: LiveVoiceSession,
-) -> None:
-    """The search result is remembered for the ``done`` frame."""
-    products = [{"id": "i1"}, {"id": "i2"}]
-    with patch(
-        "daraz_ai_shopping_assistant.voice.live_session.search_products_tool",
-        new=AsyncMock(return_value={"products": products}),
-    ):
-        await session._execute_tool("search_products", {"query": "mouse"})
-
-    assert session._last_recommended == products
-
-@pytest.mark.asyncio()
 async def test_execute_search_tool_rejects_empty_query(
     session: LiveVoiceSession,
 ) -> None:
@@ -306,7 +292,6 @@ async def test_turn_complete_emits_transcript_final_and_done(
     """``turn_complete`` emits transcript_final (if buffered) then done."""
     session._conversation_id = "conv-1"
     session._user_transcript_buffer = "find me a mouse"
-    session._last_recommended = [{"id": "i1", "title": "Mouse"}]
 
     await session._on_adapter_event({"type": "turn_complete"})
 
@@ -320,13 +305,12 @@ async def test_turn_complete_emits_transcript_final_and_done(
 
     done = next(p for p in sent if p["type"] == "done")
     assert done["conversation_id"] == "conv-1"
-    assert done["recommended_products"] == [{"id": "i1", "title": "Mouse"}]
+    assert set(done) == {"type", "conversation_id", "intent", "error"}
     assert done["error"] is None
 
     # Per-turn state is reset for the next turn.
     assert session._user_transcript_buffer == ""
     assert session._model_transcript_buffer == ""
-    assert session._last_recommended == []
 
 @pytest.mark.asyncio()
 async def test_turn_complete_without_user_transcript_skips_final(

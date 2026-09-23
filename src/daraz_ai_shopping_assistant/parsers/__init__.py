@@ -15,7 +15,6 @@ Design contract (see Specification.md Section 17 and agent.md Section 10):
 Public API:
     - parse_search_results: Markdown -> search-result dict.
     - (Phase 6) validate_product_details: structured payload -> dict.
-    - (Phase 7) validate_recommendations: structured payload -> list.
 """
 
 from __future__ import annotations

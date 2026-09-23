@@ -18,7 +18,6 @@ The system:
 - Scrapes Daraz using Firecrawl.
 - Parses scraped Markdown into validated Pydantic models.
 - Exposes clean REST APIs via FastAPI.
-- Extracts Daraz's own recommendations from product pages.
 - Runs a bounded LangGraph chat layer on top of the deterministic services.
 - Persists scrape payloads to a local JSON file for repeat reads.
 
@@ -60,7 +59,6 @@ When working on this repo, you MUST:
 
 If a task appears to require any of the following, stop and ask the user:
 
-- Custom recommendation algorithm
 - Vector databases / embeddings / Qdrant
 - Redis / caching layer (the local scrape store is not a caching layer;
   it is local durability for scrape payloads and is explicitly allowed)
@@ -189,7 +187,7 @@ import `storage/` directly.
 ### Missing data
 
 Always `null`. Never fabricate. Never guess. Never default to `0` unless the
-field is genuinely zero (e.g., `recommendations: []`).
+field is genuinely zero.
 
 ---
 
@@ -272,7 +270,6 @@ src/
     |   |-- __init__.py
     |   |-- product.py         # Product, ProductDetails, Seller, Shipping,
     |   |                      # ProductVariant, Review
-    |   |-- recommendation.py  # Recommendation (frozen)
     |   `-- search.py          # SearchResult, SearchFilters, Pagination
     |
     |-- schemas/
@@ -337,7 +334,6 @@ tests/
 |   |-- test_firecrawl_adapter.py
 |   |-- test_firecrawl_daraz_scraper.py
 |   |-- test_models_product.py
-|   |-- test_models_recommendation.py
 |   |-- test_models_search.py
 |   |-- test_product_service.py
 |   |-- test_scrape_store.py
@@ -468,7 +464,6 @@ PRODUCT_FETCH_UNEXPECTED_ERROR
 PRODUCT_VALIDATION_FAILED
 PRODUCT_ID_MISSING_PREFIX
 PRODUCT_ID_MISMATCH
-RECOMMENDATIONS_EXTRACTED
 ```
 
 Daraz scraper (FirecrawlDarazScraper):
@@ -510,7 +505,6 @@ AGENT_INTENT_PARSED
 AGENT_INTENT_PARSE_FAILED
 AGENT_TOOL_SEARCH
 AGENT_TOOL_GET_PRODUCT
-AGENT_TOOL_GET_RECOMMENDATIONS
 AGENT_TOOL_FAILED
 AGENT_RESPONSE_FAILED
 ```
@@ -539,7 +533,7 @@ how new work on it must proceed. See ADR-002 in
 ### The LLM does exactly two things
 
 1. Classify the user's intent into a structured `ParsedIntent`
-(`search`, `get_product`, `get_recommendations`, `small_talk`).
+(`search`, `get_product`, `small_talk`).
 2. Phrase a plain-language reply from the tool result.
 
 Everything else in the chat pipeline is deterministic Python.
@@ -566,15 +560,6 @@ from a tool.
 `ChatResponse.error`. Unhandled LLM errors (bad API key, network) still
 propagate to FastAPI's global handlers.
 
-### `recommended_products`
-
-Every chat response carries a structured `recommended_products` list,
-populated by `ChatService._curate_recommended_products`. It mirrors the
-window the LLM was told to work from (top five for search and
-recommendation intents). Do not attempt to parse the LLM's reply to
-extract exactly which products it mentioned -- that would require a second
-LLM call or fragile regex.
-
 ### Conversation memory
 
 - The graph is compiled with a checkpointer (`MemorySaver` in production).
@@ -590,7 +575,7 @@ messages (8 turns) via `trim_messages`.
 Filtering by node is mandatory -- `parse_intent` also calls the LLM and
 its output must never reach the client.
 - The final `done` event carries `conversation_id`, `intent`,
-`recommended_products`, and `error`.
+and `error`.
 
 ### Adding new graph nodes
 
@@ -711,7 +696,6 @@ placeholders.
 | −Data type rules | 11 |
 | Missing data | 12 |
 | Detailed product | 14 |
-| Recommendations | 15, 16 |
 | LLM usage | 17 |
 | Scraper interface | 19 |
 | Firecrawl adapter | 20 |
@@ -766,4 +750,3 @@ If any box is unchecked, fix it before responding.
 ---
 
 End of AGENTS.md.
-

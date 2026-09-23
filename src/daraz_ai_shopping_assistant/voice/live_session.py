@@ -24,7 +24,7 @@ Browser message contract (identical to the sandwich session):
         {"type": "tool_started", "tool": "..."}
         {"type": "tool_done", "tool": "..."}
         {"type": "done", "conversation_id": "...", "intent": null,
-         "recommended_products": [...], "error": null}
+         "error": null}
         {"type": "error", "message": "..."}
         {"type": "stop_playback"}
         {"type": "ping", "ts": ...}
@@ -82,8 +82,6 @@ class LiveVoiceSession:
             Gemini owns the session state).
         _send_lock: Serialises WebSocket sends.
         _heartbeat_task: Background task sending pings.
-        _last_recommended: The most recent ``recommended_products`` list
-            produced by a search tool call, surfaced on the ``done`` event.
         _user_transcript_buffer: Accumulated user transcript text for the
             current turn, flushed on turn complete.
         _model_transcript_buffer: Accumulated model transcript text.
@@ -109,7 +107,6 @@ class LiveVoiceSession:
         self._conversation_id: str | None = None
         self._send_lock: asyncio.Lock = asyncio.Lock()
         self._heartbeat_task: asyncio.Task[None] | None = None
-        self._last_recommended: list[dict[str, Any]] = []
         self._user_transcript_buffer: str = ""
         self._model_transcript_buffer: str = ""
 
@@ -238,13 +235,11 @@ class LiveVoiceSession:
                     "type": "done",
                     "conversation_id": self._conversation_id,
                     "intent": None,
-                    "recommended_products": list(self._last_recommended),
                     "error": None,
                 }
             )
             self._user_transcript_buffer = ""
             self._model_transcript_buffer = ""
-            self._last_recommended = []
             return
 
         if kind == "resumption_update":
@@ -332,7 +327,6 @@ class LiveVoiceSession:
                     page=1,
                 )
                 products = result.get("products", [])[:_SEARCH_RESULT_LIMIT]
-                self._last_recommended = list(products)
                 return {"products": products}
 
             if name == "get_product":

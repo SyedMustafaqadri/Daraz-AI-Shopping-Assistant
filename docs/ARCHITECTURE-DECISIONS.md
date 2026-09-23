@@ -18,7 +18,7 @@ page frequently yields the same layout, so regex-based parsing is cheaper,
 more testable, and more deterministic than sending the page to an LLM.
 
 Product detail pages are different. Daraz renders specifications, seller data,
-variant selectors, and recommendation panels with irregular structure that is
+variant selectors, and other panels with irregular structure that are
 difficult to cover reliably with a regex-only parser. Firecrawl's structured
 extraction gives a better fit for those pages while still allowing strict
 Pydantic validation afterward.
@@ -31,7 +31,6 @@ Split the extraction strategy by page type:
 |---|---|---|
 | Search results (`/catalog/?q=...`) | `scrape(url)` | deterministic Markdown parsing |
 | Product detail (`/products/...`) | `scrape_json(url, schema=...)` | Firecrawl structured extraction |
-| Recommendations (embedded in the product payload) | same as product detail | same structured extraction |
 
 The search path never touches an LLM. Product payloads are validated through
 `ProductDetails.model_validate(...)` before they leave the service layer.
@@ -74,7 +73,7 @@ Forbidden:
 ### Context
 
 The project implements a LangGraph chat layer. The agent can perform search,
-product lookup, and recommendation lookups by calling the same validated
+product lookup by calling the same validated
 backend services used by the REST API. That is a powerful design, but it also
 creates a risk: if the LLM were allowed to fabricate product facts or rewrite
 backend data, the system would lose trustworthiness.
@@ -96,7 +95,7 @@ Positive:
 
 - the chat endpoint remains grounded in real Daraz data
 - product validation stays centralized in the service and model layers
-- the agent can safely summarise search results or recommendations without displacing the canonical backend
+- the agent can safely summarise search results without displacing the canonical backend
 - the deterministic backend remains the source of truth for all product facts
 
 Negative:
@@ -116,4 +115,3 @@ Forbidden:
 - src/daraz_ai_shopping_assistant/agents/graph.py
 - src/daraz_ai_shopping_assistant/agents/tools.py
 - Specification.md §13, §17, §22
-

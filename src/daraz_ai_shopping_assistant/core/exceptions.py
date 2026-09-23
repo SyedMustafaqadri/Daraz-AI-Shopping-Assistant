@@ -142,7 +142,7 @@ class ParseError(DarazScraperError):
 
     Attributes:
         source: A short tag identifying which parser failed
-            (e.g., ``"search"``, ``"product"``, ``"recommendation"``).
+            (e.g., ``"search"`` or ``"product"``).
     """
 
     http_status = 502

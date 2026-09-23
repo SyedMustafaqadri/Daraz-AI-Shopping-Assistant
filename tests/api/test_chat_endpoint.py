@@ -5,7 +5,6 @@ these tests never touch the LLM or the network. They cover:
 
     - happy path with a reply and data,
     - conversation_id pass-through and echo,
-    - recommended_products echo,
     - request-body validation (empty message -> 422),
     - error mapping from typed exceptions,
     - the OpenAPI surface.
@@ -51,10 +50,6 @@ def test_chat_happy_path(client: TestClient, mock_chat_service: MagicMock) -> No
         reply="Here are the gaming mice I found.",
         conversation_id="conv-abc",
         intent="search",
-        recommended_products=[
-            {"id": "i1959941878", "title": "RGB Gaming Mouse", "price": 579.0},
-            {"id": "i1962924638", "title": "Rgb Gaming Mouse", "price": 599.0},
-        ],
         data={"search_query": "gaming mouse", "products": []},
         error=None,
     )
@@ -69,8 +64,7 @@ def test_chat_happy_path(client: TestClient, mock_chat_service: MagicMock) -> No
     assert body["reply"] == "Here are the gaming mice I found."
     assert body["conversation_id"] == "conv-abc"
     assert body["intent"] == "search"
-    assert len(body["recommended_products"]) == 2
-    assert body["recommended_products"][0]["id"] == "i1959941878"
+    assert set(body) == {"reply", "conversation_id", "intent", "data", "error"}
     assert body["data"]["search_query"] == "gaming mouse"
     assert body["error"] is None
 
@@ -93,12 +87,11 @@ def test_chat_without_conversation_id_echoes_server_value(
     assert response.status_code == 200
     body = response.json()
     assert body["conversation_id"] == "generated-uuid"
-    assert body["recommended_products"] == []
 
     mock_chat_service.chat.assert_awaited_once_with("hi", None)
 
 def test_chat_small_talk(client: TestClient, mock_chat_service: MagicMock) -> None:
-    """A small-talk reply has no data payload and no recommendations."""
+    """A small-talk reply has no data payload."""
     mock_chat_service.chat.return_value = ChatResponse(
         reply="Hello! How can I help you today?",
         conversation_id="conv-1",
@@ -111,7 +104,6 @@ def test_chat_small_talk(client: TestClient, mock_chat_service: MagicMock) -> No
     body = response.json()
     assert body["intent"] == "small_talk"
     assert body["data"] is None
-    assert body["recommended_products"] == []
 
 def test_chat_empty_message_returns_422(client: TestClient) -> None:
     """An empty message is rejected by request validation."""

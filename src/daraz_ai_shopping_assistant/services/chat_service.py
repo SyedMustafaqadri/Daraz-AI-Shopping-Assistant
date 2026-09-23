@@ -8,7 +8,6 @@ The service is the ONLY place that:
     - constructs the initial AgentState from a user message,
     - derives or echoes the conversation id,
     - extracts the final reply from the graph output,
-    - curates the structured ``recommended_products`` list,
     - shapes the response envelope for the API layer,
     - exposes streaming variants for SSE and voice clients.
 
@@ -40,11 +39,6 @@ from daraz_ai_shopping_assistant.core.logging import get_logger
 from daraz_ai_shopping_assistant.schemas.chat import ChatResponse
 
 logger = get_logger(__name__)
-
-#: Maximum number of products included in ``recommended_products``.
-#: Matches the instruction in ``_RESPONSE_SYSTEM_PROMPT``: the LLM is told
-#: to present "the most relevant ones ... do not list more than 5 products".
-_RECOMMENDED_LIMIT: int = 5
 
 class ChatService:
     """Route a user message through the LangGraph agent.
@@ -113,7 +107,6 @@ class ChatService:
         intent = final_state.get("intent")
         tool_result = final_state.get("tool_result")
         error = final_state.get("error")
-        recommended = _curate_recommended_products(intent, tool_result)
 
         duration_ms = int((time.monotonic() - started_at) * 1000)
         logger.info(
@@ -123,7 +116,6 @@ class ChatService:
                     "conversation_id": resolved_id,
                     "intent": intent.intent.value if intent else None,
                     "has_data": tool_result is not None,
-                    "recommended_count": len(recommended),
                     "has_error": error is not None,
                     "duration_ms": duration_ms,
                     "streaming": False,
@@ -135,7 +127,6 @@ class ChatService:
             reply=reply,
             conversation_id=resolved_id,
             intent=intent.intent.value if intent else None,
-            recommended_products=recommended,
             data=tool_result,
             error=error,
         )
@@ -158,7 +149,7 @@ class ChatService:
 
             {"type": "token", "text": "..."} -- one LLM token.
             {"type": "done", "conversation_id": "...", "intent": "...",
-             "recommended_products": [...], "error": null | "..."} -- end.
+             "error": null | "..."} -- end.
 
         Only tokens produced by the ``respond`` node are emitted. The
         ``parse_intent`` node also calls the LLM, but its output is a
@@ -224,9 +215,7 @@ class ChatService:
             )
 
         intent_obj = final_values.get("intent")
-        tool_result = final_values.get("tool_result")
         error_value = final_values.get("error")
-        recommended = _curate_recommended_products(intent_obj, tool_result)
 
         duration_ms = int((time.monotonic() - started_at) * 1000)
         logger.info(
@@ -235,7 +224,6 @@ class ChatService:
                 "ctx": {
                     "conversation_id": resolved_id,
                     "intent": intent_obj.intent.value if intent_obj else None,
-                    "recommended_count": len(recommended),
                     "has_error": error_value is not None,
                     "token_count": token_count,
                     "duration_ms": duration_ms,
@@ -248,7 +236,6 @@ class ChatService:
             "type": "done",
             "conversation_id": resolved_id,
             "intent": intent_obj.intent.value if intent_obj else None,
-            "recommended_products": recommended,
             "error": error_value,
         }
 
@@ -284,7 +271,7 @@ class ChatService:
                 it.
 
             {"type": "done", "conversation_id": "...", "intent": "...",
-             "recommended_products": [...], "error": null | "..."}
+             "error": null | "..."}
                 Terminal event.
 
         Args:
@@ -379,9 +366,7 @@ class ChatService:
             )
 
         intent_obj = _coerce_parsed_intent(final_values.get("intent"))
-        tool_result = final_values.get("tool_result")
         error_value = final_values.get("error")
-        recommended = _curate_recommended_products(intent_obj, tool_result)
 
         duration_ms = int((time.monotonic() - started_at) * 1000)
         logger.info(
@@ -390,7 +375,6 @@ class ChatService:
                 "ctx": {
                     "conversation_id": resolved_id,
                     "intent": intent_obj.intent.value if intent_obj else None,
-                    "recommended_count": len(recommended),
                     "has_error": error_value is not None,
                     "token_count": token_count,
                     "duration_ms": duration_ms,
@@ -402,7 +386,6 @@ class ChatService:
             "type": "done",
             "conversation_id": resolved_id,
             "intent": intent_obj.intent.value if intent_obj else None,
-            "recommended_products": recommended,
             "error": error_value,
         }
 
@@ -443,45 +426,6 @@ def _thread_config(conversation_id: str) -> dict[str, Any]:
         A config dict of the shape LangGraph's checkpointer expects.
     """
     return {"configurable": {"thread_id": conversation_id}}
-
-def _curate_recommended_products(
-    intent: Any,
-    tool_result: dict[str, Any] | None,
-    *,
-    limit: int = _RECOMMENDED_LIMIT,
-) -> list[dict[str, Any]]:
-    """Return the structured list of products the assistant recommends.
-
-    The LLM's prompt instructs it to present the top N products from the
-    tool result. Extracting WHICH products it mentioned would require a
-    second LLM call or fragile parsing of its prose. Instead we mirror the
-    window it was told to work from: the first ``limit`` products.
-
-    Args:
-        intent: The ParsedIntent stored on AgentState, or ``None``.
-        tool_result: The tool result dict, or ``None``.
-        limit: Maximum number of products to return.
-
-    Returns:
-        A list of product dicts (possibly empty). Each dict is a
-        Pydantic-validated product as serialised by the service layer.
-    """
-    if intent is None or tool_result is None:
-        return []
-
-    intent_kind = getattr(intent, "intent", None)
-    intent_value = getattr(intent_kind, "value", intent_kind)
-
-    if intent_value == "search":
-        products = tool_result.get("products") or []
-        return [p for p in products[:limit] if isinstance(p, dict)]
-
-    if intent_value == "get_product":
-        if isinstance(tool_result, dict) and tool_result.get("id"):
-            return [tool_result]
-        return []
-
-    return []
 
 def _chunk_text(chunk: Any) -> str:
     """Extract the text from an ``on_chat_model_stream`` chunk.

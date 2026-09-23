@@ -121,7 +121,6 @@ Mirror the AGENT.md checklist:
 If a task seems to require any of the following, stop and ask the user first
 (see AGENT.md §3 and Spec §3):
 
-- Custom recommendation algorithm
 - Vector DB / embeddings / Qdrant
 - Redis / caching
 - Authentication or payments

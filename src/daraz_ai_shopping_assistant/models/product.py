@@ -4,8 +4,8 @@ Defines two levels of product representation:
 
 - :class:`Product` — the lightweight object returned in search results.
 - :class:`ProductDetails` — the full product-page object, which extends
-  :class:`Product` with description, seller, shipping, variants, reviews,
-  and Daraz-sourced recommendations.
+  :class:`Product` with description and nested seller, shipping, variant,
+  and review details.
 
 Supporting sub-objects (:class:`Seller`, :class:`Shipping`,
 :class:`ProductVariant`, :class:`Review`) are used inside
@@ -18,7 +18,6 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from daraz_ai_shopping_assistant.models.recommendation import Recommendation
 
 
 # ---------------------------------------------------------------------- #
@@ -273,11 +272,4 @@ class ProductDetails(Product):
     reviews: list[Review] = Field(
         default_factory=list,
         description="Customer reviews, empty when none are rendered.",
-    )
-    recommendations: list[Recommendation] = Field(
-        default_factory=list,
-        description=(
-            "Products recommended by Daraz on this page. Empty when the "
-            "carousel is absent — never fabricated by the backend."
-        ),
     )

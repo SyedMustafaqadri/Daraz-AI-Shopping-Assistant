@@ -119,8 +119,7 @@ def create_app() -> FastAPI:
         version=__version__,
         description=(
             "Backend for the Daraz AI Shopping Assistant. "
-            "Search Daraz products, retrieve product details, and inspect "
-            "Daraz's own recommendations."
+            "Search Daraz products and retrieve product details."
         ),
         docs_url="/docs" if settings.app_env == "dev" else None,
         redoc_url="/redoc" if settings.app_env == "dev" else None,

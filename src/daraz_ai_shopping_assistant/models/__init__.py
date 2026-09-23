@@ -11,7 +11,6 @@ Public API:
       — sub-objects used inside :class:`ProductDetails`.
     - :class:`SearchFilters`, :class:`Pagination`, :class:`SearchResult`
       — the envelope returned by the search endpoint.
-    - :class:`Recommendation` — a single item recommended by Daraz.
 """
 
 from __future__ import annotations
@@ -24,7 +23,6 @@ from daraz_ai_shopping_assistant.models.product import (
     Seller,
     Shipping,
 )
-from daraz_ai_shopping_assistant.models.recommendation import Recommendation
 from daraz_ai_shopping_assistant.models.search import (
     Pagination,
     SearchFilters,
@@ -36,7 +34,6 @@ __all__ = [
     "Product",
     "ProductDetails",
     "ProductVariant",
-    "Recommendation",
     "Review",
     "SearchFilters",
     "SearchResult",

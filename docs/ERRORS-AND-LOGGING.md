@@ -82,11 +82,10 @@ The formatters render `ctx` into readable console output or JSON output.
 | `SEARCH_EMPTY` | search result handling | empty page |
 | `PRODUCT_STORE_HIT` | `ProductService.get_product` | cache hit; short-circuits the scrape |
 | `PRODUCT_FETCH_STARTED` | `ProductService.get_product` | product id |
-| `PRODUCT_FETCH_COMPLETED` | `ProductService.get_product` | duration + recommendation count |
+| `PRODUCT_FETCH_COMPLETED` | `ProductService.get_product` | duration |
 | `PRODUCT_FETCH_UNEXPECTED_ERROR` | `ProductService.get_product` | non-scraper exception |
 | `PRODUCT_ID_MISSING_PREFIX` | `ProductService._normalise_product_id` | LLM dropped the `i` prefix |
 | `PRODUCT_ID_MISMATCH` | `ProductService._normalise_product_id` | LLM returned a different id |
-| `RECOMMENDATIONS_EXTRACTED` | `ProductService.get_recommendations` | recommendation count |
 | `DARAZ_SEARCH_FETCH` | `FirecrawlDarazScraper` | outgoing Daraz search URL |
 | `DARAZ_PRODUCT_FETCH` | `FirecrawlDarazScraper` | outgoing Daraz product URL |
 | `DARAZ_PRODUCT_PAYLOAD_SHAPE` | `FirecrawlDarazScraper` | shape-only summary of the LLM payload |
@@ -107,7 +106,6 @@ The formatters render `ctx` into readable console output or JSON output.
 | `AGENT_INTENT_PARSE_FAILED` | `agents/graph.py` | fallback to small talk |
 | `AGENT_TOOL_SEARCH` | `agents/tools.py` | search tool invoked |
 | `AGENT_TOOL_GET_PRODUCT` | `agents/tools.py` | product tool invoked |
-| `AGENT_TOOL_GET_RECOMMENDATIONS` | `agents/tools.py` | recommendations tool invoked |
 | `AGENT_TOOL_FAILED` | `agents/graph.py` | typed scraper error captured by a tool node |
 | `AGENT_RESPONSE_FAILED` | `agents/graph.py` | reply-phrasing LLM call raised |
 | `API_ERROR` | exception handler | request-scoped error |
@@ -138,4 +136,3 @@ product id, so a hit vs. miss is trivially visible in a single log line.
 - A corrupt store file is treated as an empty store. The app logs
 `SCRAPE_STORE_LOAD_FAILED` and continues; the next successful scrape
 rewrites the file.
-

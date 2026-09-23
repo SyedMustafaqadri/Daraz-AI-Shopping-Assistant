@@ -13,7 +13,7 @@ Responsibilities:
 Rendering options (why product pages pass them):
 
     Daraz product pages render several sections (description,
-    specifications, reviews, recommendations) lazily after the initial
+    specifications and reviews) lazily after the initial
     document load. A default Firecrawl scrape returns only the
     above-the-fold content plus a lot of navigation chrome. Empirically,
     a default Markdown scrape of a Daraz product page contains none of
@@ -58,8 +58,8 @@ logger = get_logger(__name__)
 # Product-page rendering options
 # ---------------------------------------------------------------------- #
 #: Milliseconds to wait after page load before snapshotting. Daraz's
-#: below-the-fold sections (description, specifications, reviews,
-#: recommendations) render lazily. Five seconds is generous enough for a
+#: below-the-fold sections (description, specifications, and reviews)
+#: render lazily. Five seconds is generous enough for a
 #: cold render on a slow connection, and short enough that the request
 #: still feels interactive.
 _PRODUCT_WAIT_FOR_MS: int = 5000
@@ -115,9 +115,6 @@ _PRODUCT_EXTRACTION_PROMPT: str = (
     "- reviews: the 'Ratings & Reviews' section. Each review has a star "
     "rating (number 0-5), comment text, author name, and date string. "
     "Extract every review visible on the page.\n"
-    "- recommendations: the 'Recommended for you' / 'You may also like' "
-    "/ 'Similar products' carousel. Extract each card's id, title, url, "
-    "image, price, and discount_percentage.\n"
     "\n"
     "Numeric rules (strict):\n"
     "- price, original_price, shipping.fee: bare numbers in PKR. Write "
@@ -395,9 +392,6 @@ class FirecrawlDarazScraper(DarazScraper):
                     ),
                     "variants_count": len(payload.get("variants") or []),
                     "reviews_count": len(payload.get("reviews") or []),
-                    "recommendations_count": len(
-                        payload.get("recommendations") or []
-                    ),
                 }
             },
         )

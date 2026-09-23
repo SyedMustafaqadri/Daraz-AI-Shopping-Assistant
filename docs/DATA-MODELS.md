@@ -53,7 +53,6 @@ optional because not every Daraz product page renders the same sections.
 | `availability` | `str \| None` | `None` | e.g. `"In Stock"` |
 | `variants` | `list[ProductVariant]` | `[]` | Colour/size/bundle |
 | `reviews` | `list[Review]` | `[]` | Customer reviews |
-| `recommendations` | `list[Recommendation]` | `[]` | Daraz's own carousel; never fabricated |
 
 `ProductDetails` is the model whose `model_json_schema()` is passed to
 Firecrawl structured extraction.
@@ -94,27 +93,7 @@ Firecrawl structured extraction.
 
 ---
 
-## 4. `Recommendation` (models/recommendation.py)
-
-A single card from Daraz's recommendation carousel. A **frozen**,
-intentionally-reduced subset of `Product` — the carousel renders less
-information than a search result.
-
-| Field | Type | Required | Notes |
-|---|---|---|---|
-| `id` | `str` | yes | `min_length=1` |
-| `title` | `str` | yes | `min_length=1` |
-| `url` | `str` | yes | must be `http(s)://` |
-| `image` | `str \| None` | no | must be `http(s)://` when present |
-| `price` | `float \| None` | no | `ge=0` |
-| `currency` | `str` | yes | defaults to `"PKR"` |
-| `discount_percentage` | `int \| None` | no | `0–100` |
-
-`model_config` adds `frozen=True` so recommendations are immutable.
-
----
-
-## 5. Search Envelope (models/search.py)
+## 4. Search Envelope (models/search.py)
 
 ### `SearchFilters`
 | Field | Type | Notes |

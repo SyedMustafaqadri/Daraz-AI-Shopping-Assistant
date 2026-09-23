@@ -180,7 +180,6 @@ class ProductService:
             extra={
                 "ctx": {
                     "product_id": normalized_id,
-                    "recommendations": len(product.recommendations),
                     "duration_ms": duration_ms,
                 }
             },

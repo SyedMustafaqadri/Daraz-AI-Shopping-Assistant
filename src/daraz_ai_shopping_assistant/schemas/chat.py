@@ -14,13 +14,6 @@ Conversation identity:
     new one and returns it in the response; the client sends it back on
     the next turn.
 
-Recommended products:
-
-    ``recommended_products`` is a curated, structured list of the products
-    the assistant is recommending in this turn. It mirrors the window the
-    LLM was told to work from (top five for search and recommendation
-    intents). Clients that want a structured list without parsing the
-    LLM's prose read this field.
 """
 
 from __future__ import annotations
@@ -60,9 +53,7 @@ class ChatResponse(BaseModel):
 
     ``reply`` is always present and is what a chat UI shows. ``data`` is
     the raw tool result and is only present when a tool ran -- the client
-    uses ``intent`` to decide how to render it. ``recommended_products``
-    is a curated, structured list that mirrors the products the reply
-    refers to.
+    uses ``intent`` to decide how to render it.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -85,27 +76,14 @@ class ChatResponse(BaseModel):
         default=None,
         description=(
             "Which action the agent took: 'search', 'get_product', "
-            "'get_recommendations', or 'small_talk'."
-        ),
-    )
-    recommended_products: list[dict[str, Any]] = Field(
-        default_factory=list,
-        description=(
-            "Structured list of the products the assistant is "
-            "recommending in this turn. For a search intent this is the "
-            "top five products from the result set. For a get_product "
-            "intent it is a single-item list. For get_recommendations it "
-            "is the top five recommendations. Empty for small-talk and "
-            "tool errors. Each entry is a product dict shaped like the "
-            "Product or Recommendation model."
+            "or 'small_talk'."
         ),
     )
     data: dict[str, Any] | None = Field(
         default=None,
         description=(
             "Raw tool result. Shape depends on intent: a SearchResult for "
-            "'search', a ProductDetails for 'get_product', or a dict with "
-            "a 'recommendations' list for 'get_recommendations'."
+            "'search' or a ProductDetails for 'get_product'."
         ),
     )
     error: str | None = Field(

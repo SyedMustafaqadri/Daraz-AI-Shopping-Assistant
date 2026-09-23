@@ -22,7 +22,7 @@ Two entry points (see ``docs/ARCHITECTURE-DECISIONS.md`` ADR-001):
 Rendering options (added after diagnosing an incomplete product snapshot):
 
     Daraz product pages render several sections (description, specifications,
-    reviews, recommendations) lazily, after the initial document load. A
+    reviews) lazily, after the initial document load. A
     default scrape returns only the above-the-fold content, and Firecrawl's
     ``only_main_content`` filter drops even more. The adapter therefore
     supports two options -- ``wait_for_ms`` and ``only_main_content`` -- that
@@ -439,7 +439,7 @@ class FirecrawlAdapter:
             wait_for_ms: Milliseconds to wait after page load before
                 snapshotting. Raise this for pages with lazily-rendered
                 sections -- Daraz product descriptions, specifications,
-                reviews, and recommendations are all below the fold.
+                and reviews -- are below the fold.
             only_main_content: When ``True``, Firecrawl strips navigation,
                 footers, and other non-main content. Set to ``False`` on
                 pages where the sections you need are being classified as

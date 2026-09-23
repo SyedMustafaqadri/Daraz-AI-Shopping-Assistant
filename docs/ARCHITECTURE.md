@@ -111,26 +111,6 @@ validated ProductDetails response
 The product-detail flow uses Firecrawl structured extraction rather than
 regex parsing.
 
-### 2.3 Recommendations path
-
-```
-
-GET /api/v1/products/{product_id}/recommendations
-|
-v
-ProductService.get_recommendations
-|
-v
-ProductService.get_product(product_id)
-|  (store lookup or scrape, then validate)
-v
-return Recommendation[] (possibly empty)
-
-```
-
-No second Firecrawl call is made. Recommendations are sourced from the
-product payload itself.
-
 ### 2.4 Chat path
 
 ```
@@ -144,7 +124,6 @@ ChatService.chat           ChatService.chat_stream
 |  3. graph.ainvoke / graph.astream_events
 |       config={"configurable": {"thread_id": conversation_id}}
 |  4. extract last AIMessage as reply
-|  5. curate recommended_products from tool_result
 v
 ChatResponse / SSE frames
 
@@ -158,7 +137,6 @@ ChatResponse / SSE frames
 |----------------------|-------------------------|--------------------------------|-----------------------------------|
 | Search results       | Markdown scrape         | deterministic parser           | `Product.model_validate`          |
 | Product detail       | JSON schema extraction  | structured extraction          | `ProductDetails.model_validate`   |
-| Recommendation carousel | same as product detail | nested structured extraction | `Recommendation.model_validate`  |
 
 This keeps the search layer deterministic while allowing the irregular
 product-detail page to be handled by a schema-driven extraction model.
@@ -182,7 +160,7 @@ LangGraph graph.astream_events
 |     configurable.thread_id = conversation_id
 v
 +-----------------------------------------------------------------+
-|  parse_intent  ->  search / get_product / get_recommendations   |
+|  parse_intent  ->  search / get_product / small_talk             |
 |         |             |             |             |             |
 |         +-------------+------+------+------+------+             |
 |                              v                                  |
@@ -221,16 +199,7 @@ is `"respond"`. This filter is essential: `parse_intent` also calls the
 LLM, and its output is a structured object that must never be streamed to
 the client. After the loop, the service fetches the final state via
 `graph.aget_state` and emits a single `done` event carrying
-`conversation_id`, `intent`, `recommended_products`, and `error`.
-
-### 4.3 recommended_products
-
-The response's `recommended_products` field is populated by
-`ChatService._curate_recommended_products`. It mirrors the window the LLM
-was told to work from (top five for search and recommendation intents),
-so clients can render the top products directly without parsing the
-LLM's prose or making a second LLM call to identify which products were
-mentioned. See `docs/API-REFERENCE.md` for the full semantics table.
+`conversation_id`, `intent`, and `error`.
 
 ---
 
@@ -263,7 +232,6 @@ src/daraz_ai_shopping_assistant/
 |-- models/
 |   |-- __init__.py
 |   |-- product.py
-|   |-- recommendation.py
 |   `-- search.py
 |-- parsers/
 |   |-- **init**.py
@@ -304,7 +272,7 @@ no placeholder-only product-service layer.
 
 The project normalises values at the model boundary. `price` is a `float`,
 `discount_percentage` is `int | None`, and missing values stay `None`
-unless a collection such as `recommendations` is legitimately empty.
+unless a collection is legitimately empty.
 
 ### 6.2 The model is the contract
 
@@ -345,7 +313,6 @@ change.
 | 4     | `SearchService` + `FirecrawlDarazScraper`                    | Done   |
 | 5     | `GET /api/v1/products/search`                                | Done   |
 | 6     | Product page extraction (`ProductService.get_product`)       | Done   |
-| 7     | Recommendation extraction (`ProductService.get_recommendations`) | Done |
 | 8     | LangGraph AI layer (`POST /api/v1/chat`)                     | Done   |
 | 9     | Conversation memory + SSE streaming + JSON scrape store      | Done   |
 

@@ -2,8 +2,7 @@
 
 The compiled graph is mocked, so these tests never touch the LLM. They
 verify that the service builds the initial state correctly, extracts the
-reply from the final state, curates the recommended_products list, and
-surfaces errors.
+reply from the final state and surfaces errors.
 """
 
 from __future__ import annotations
@@ -18,7 +17,6 @@ from langchain_core.messages import AIMessage, HumanMessage
 from daraz_ai_shopping_assistant.agents.state import IntentType, ParsedIntent
 from daraz_ai_shopping_assistant.services.chat_service import (
     ChatService,
-    _curate_recommended_products,
     _extract_reply,
 )
 
@@ -47,7 +45,6 @@ async def test_chat_returns_reply_from_final_ai_message() -> None:
 
     assert response.reply == "Hello! How can I help?"
     assert response.intent == "small_talk"
-    assert response.recommended_products == []
     assert response.data is None
     assert response.error is None
 
@@ -69,47 +66,6 @@ async def test_chat_returns_tool_result_when_present() -> None:
 
     assert response.data == {"search_query": "mouse", "products": []}
     assert response.intent == "search"
-    assert response.recommended_products == []
-
-@pytest.mark.asyncio()
-async def test_chat_curates_search_recommendations() -> None:
-    """A search result curates the first five products."""
-    products = [
-        {"id": f"i{i}", "title": f"Product {i}", "price": 100 + i}
-        for i in range(10)
-    ]
-    final_state = {
-        "messages": [HumanMessage(content="mouse"), AIMessage(content="Here.")],
-        "intent": ParsedIntent(intent=IntentType.SEARCH, query="mouse"),
-        "tool_result": {"search_query": "mouse", "products": products},
-        "error": None,
-    }
-    service = ChatService(graph=_make_graph(final_state))
-
-    response = await service.chat("mouse")
-
-    assert len(response.recommended_products) == 5
-    assert response.recommended_products[0]["id"] == "i0"
-    assert response.recommended_products[4]["id"] == "i4"
-
-@pytest.mark.asyncio()
-async def test_chat_curates_get_product_as_single_item_list() -> None:
-    """A get_product result becomes a one-item list."""
-    product = {"id": "i1959941878", "title": "Mouse", "price": 579.0}
-    final_state = {
-        "messages": [HumanMessage(content="details"), AIMessage(content="Here.")],
-        "intent": ParsedIntent(
-            intent=IntentType.GET_PRODUCT, product_id="i1959941878"
-        ),
-        "tool_result": product,
-        "error": None,
-    }
-    service = ChatService(graph=_make_graph(final_state))
-
-    response = await service.chat("details")
-
-    assert response.recommended_products == [product]
-
 @pytest.mark.asyncio()
 async def test_chat_propagates_error_field() -> None:
     """An error from the graph is surfaced on the response."""
@@ -125,7 +81,6 @@ async def test_chat_propagates_error_field() -> None:
 
     assert response.error == "upstream timeout"
     assert response.data is None
-    assert response.recommended_products == []
 
 @pytest.mark.asyncio()
 async def test_chat_handles_missing_intent() -> None:
@@ -141,7 +96,6 @@ async def test_chat_handles_missing_intent() -> None:
     response = await service.chat("hi")
 
     assert response.intent is None
-    assert response.recommended_products == []
 
 @pytest.mark.asyncio()
 async def test_chat_uses_fallback_when_no_ai_message() -> None:
@@ -218,51 +172,3 @@ def test_extract_reply_handles_empty_state() -> None:
     state: dict[str, Any] = {"messages": []}
     reply = _extract_reply(state)
     assert reply
-
-# ---------------------------------------------------------------------- #
-# _curate_recommended_products
-# ---------------------------------------------------------------------- #
-def test_curate_returns_empty_for_none_intent() -> None:
-    """No intent means no recommendations."""
-    assert _curate_recommended_products(None, {"products": [{"id": "i1"}]}) == []
-
-def test_curate_returns_empty_for_none_tool_result() -> None:
-    """No tool result means no recommendations."""
-    intent = ParsedIntent(intent=IntentType.SEARCH, query="mouse")
-    assert _curate_recommended_products(intent, None) == []
-
-def test_curate_search_limits_to_five() -> None:
-    """The search branch caps at five products."""
-    products = [{"id": f"i{i}"} for i in range(20)]
-    intent = ParsedIntent(intent=IntentType.SEARCH, query="mouse")
-    result = _curate_recommended_products(intent, {"products": products})
-    assert len(result) == 5
-
-def test_curate_search_handles_empty_product_list() -> None:
-    """An empty product list yields an empty recommendation list."""
-    intent = ParsedIntent(intent=IntentType.SEARCH, query="mouse")
-    assert _curate_recommended_products(intent, {"products": []}) == []
-
-def test_curate_search_skips_non_dict_entries() -> None:
-    """Defensive: non-dict entries are dropped."""
-    intent = ParsedIntent(intent=IntentType.SEARCH, query="mouse")
-    result = _curate_recommended_products(
-        intent, {"products": [{"id": "i1"}, "not-a-dict", None, {"id": "i2"}]}
-    )
-    assert len(result) == 2
-
-def test_curate_get_product_single_item() -> None:
-    """A get_product result becomes a one-item list."""
-    intent = ParsedIntent(intent=IntentType.GET_PRODUCT, product_id="i1")
-    result = _curate_recommended_products(intent, {"id": "i1", "title": "x"})
-    assert result == [{"id": "i1", "title": "x"}]
-
-def test_curate_get_product_missing_id_returns_empty() -> None:
-    """A get_product payload without an id yields an empty list."""
-    intent = ParsedIntent(intent=IntentType.GET_PRODUCT, product_id="i1")
-    assert _curate_recommended_products(intent, {"title": "x"}) == []
-
-def test_curate_small_talk_returns_empty() -> None:
-    """Small talk has no products to recommend."""
-    intent = ParsedIntent(intent=IntentType.SMALL_TALK)
-    assert _curate_recommended_products(intent, {"anything": "goes"}) == []

@@ -7,11 +7,6 @@ products from **Daraz.pk**, extracts product information using **Firecrawl**,
 structures and validates the data, and exposes clean APIs for a future
 chatbot/frontend.
 
-The system does **not** implement its own recommendation algorithm.
-
-When available on Daraz product pages, the backend extracts **Daraz's own
-recommended/similar products** and returns them.
-
 The backend is developed independently from any frontend.
 
 **Status:** Phases 1-9 complete. All endpoints (including streaming and
@@ -42,7 +37,6 @@ The MVP backend is able to:
 
 Intentionally excluded from the first version:
 
-- Custom product recommendation algorithms.
 - Vector database / embeddings.
 - Qdrant.
 - Redis.
@@ -198,7 +192,6 @@ Two distinct extraction pipelines exist, chosen by page type:
 |---|---|---|---|
 | −Search results (`/catalog/?q=...`) | `scrape(url)` -> Markdown | Deterministic parser (regex + string logic) | `Product.model_validate` |
 | Product detail (`/products/...`) | `scrape_json(url, schema=...)` -> dict | Firecrawl structured extraction (LLM) | `ProductDetails.model_validate` |
-| Recommendations (embedded in product page) | Same as product detail | Same as product detail, nested schema | `Recommendation.model_validate` |
 ⚙
 
 **Rules:**
@@ -443,7 +436,7 @@ Contains all search-product fields plus:
 
 ```
 description, specifications, seller, shipping,
-availability, variants, reviews, recommendations
+availability, variants, reviews
 ```
 
 ---
@@ -472,7 +465,6 @@ availability, variants, reviews, recommendations
   "availability": null,
   "variants": [],
   "reviews": [],
-  "recommendations": []
 }
 ```
 
@@ -489,9 +481,6 @@ are documented here rather than chased indefinitely:
 - **`specifications`** may return `{}` even when the "Specifications of"
 heading is present in Firecrawl's Markdown snapshot. Treat an empty
 `specifications` object as "not available" rather than "not rendered".
-- **`recommendations`** is always `[]` in the current implementation. The
-recommendation carousel loads only after a scroll event, which the
-scrape does not trigger. Deferred.
 - **`rating`** on search-result products is always `null`. Daraz renders
 stars as images, which Markdown strips. `rating_count` is present and
 correct.
@@ -503,31 +492,6 @@ All other fields (`id`, `title`, `url`, `image`, `price`, `currency`,
 
 The service-layer `_normalise_product_id` helper repairs one known LLM
 quirk: the model occasionally strips the `i` prefix from the `id` field.
-
----
-
-# 15. Recommendation Strategy
-
-The MVP does NOT build a custom recommendation engine.
-
-Daraz already has its own recommendation system. The backend attempts to
-extract recommendations shown on the Daraz product page.
-
-Recommendations are extracted as part of the product-detail structured
-extraction -- the `ProductDetails` schema includes a `recommendations:
-array` field. No separate Firecrawl call is made.
-
----
-
-# 16. Recommendation Failure Behavior
-
-If Daraz recommendations cannot be detected:
-
-```
-{ "recommendations": [] }
-```
-
-The backend must NOT generate fake recommendations.
 
 ---
 
@@ -658,7 +622,6 @@ daraz-ai-shopping-assistant/
 |       |   +-- __init__.py
 |       |   +-- product.py
 |       |   +-- search.py
-|       |   +-- recommendation.py
 |       |
 |       +-- schemas/
 |       |   +-- __init__.py
@@ -768,17 +731,6 @@ Response shape: `ProductDetails` (Section 14).
 
 ---
 
-# 24. Get Recommendations Endpoint
-
-```
-GET /api/v1/products/{product_id}/recommendations
-```
-
-Returns the `recommendations` array from the product-detail payload. No
-second Firecrawl call is made. Empty when the carousel is absent.
-
----
-
 # 25. Chat Endpoint
 
 ```
@@ -805,10 +757,6 @@ Response body:
   "reply": "Here are some gaming mice under Rs. 5,000...",
   "conversation_id": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
   "intent": "search",
-  "recommended_products": [
-    { "id": "i1959941878", "title": "...", "price": 579, "url": "..." },
-    { "id": "i201116087", "title": "...", "price": 997, "url": "..." }
-  ],
   "data": { "products": [ ... ], ... },
   "error": null
 }
@@ -820,8 +768,7 @@ Response fields:
 |---|---|
 | −`reply` | Assistant's natural-language reply (always present) |
 | −`conversation_id` | Echo for the next turn (always present) |
-| `intent` | `search`, `get_product`, `get_recommendations`, `small_talk` |
-| `recommended_products` | Structured list of products the assistant is recommending |
+| `intent` | `search`, `get_product`, `small_talk` |
 | `data` | Raw tool result, shape depends on intent |
 | `error` | Non-null only when a tool failed |
 ⚙
@@ -964,7 +911,6 @@ Cover:
 - `SearchService` and `ProductService` orchestration with mocked scrapers
 - `ScrapeStore` load, get, set, prune, corrupt-file tolerance, atomicity
 - agent state schema, tool functions, graph routing, chat service
-- `recommended_products` curation in `ChatService`
 
 ## Integration Tests
 
@@ -979,7 +925,6 @@ overrides:
 ```
 GET  /api/v1/products/search
 GET  /api/v1/products/{id}
-GET  /api/v1/products/{id}/recommendations
 POST /api/v1/chat
 POST /api/v1/chat/stream
 ```
@@ -1018,10 +963,6 @@ Pydantic models. **Done.**
 
 `ProductService.get_product()`. **Done.**
 
-## Phase 7 -- Recommendation Extraction
-
-`ProductService.get_recommendations()`. **Done.**
-
 ## Phase 8 -- AI Layer
 
 LangGraph agent, `ChatService`, `POST /api/v1/chat`. **Done.**
@@ -1029,8 +970,7 @@ LangGraph agent, `ChatService`, `POST /api/v1/chat`. **Done.**
 ## Phase 9 -- Memory, Streaming, Storage
 
 Conversation memory (`MemorySaver`), Server-Sent Events streaming
-(`/api/v1/chat/stream`), local JSON scrape store, structured
-`recommended_products` in the chat response. **Done.**
+(`/api/v1/chat/stream`), and local JSON scrape store. **Done.**
 
 ---
 
@@ -1040,8 +980,6 @@ The MVP is successful when:
 
 - `GET /api/v1/products/search` returns a validated `SearchResult`.
 - `GET /api/v1/products/{id}` returns a validated `ProductDetails`.
-- `GET /api/v1/products/{id}/recommendations` returns Daraz's
-recommendations when available.
 - `POST /api/v1/chat` routes correctly and returns a non-fabricated reply.
 - `POST /api/v1/chat/stream` emits tokens incrementally over SSE.
 - A repeat request for the same search or product key hits the local
@@ -1083,9 +1021,6 @@ Display products
 Allow user to inspect product
       |
       v
-Retrieve Daraz recommendations
-      |
-      v
 Continue conversation
 ```
 
@@ -1096,8 +1031,8 @@ Examples of future interactions the architecture supports:
 - "Tell me more about the second product."
 - "Compare these three."
 
-The current implementation covers search, product-detail, recommendations,
-chat with memory, streaming, and local scrape caching. Multi-turn
+The current implementation covers search, product-detail, chat with memory,
+streaming, and local scrape caching. Multi-turn
 filtering and comparison are extensions that do not require rewriting the
 scraping layer.
 
@@ -1218,7 +1153,6 @@ of each ADR lives in `docs/ARCHITECTURE-DECISIONS.md`.
 |---|---|---|
 | −Search results (`/catalog/?q=...`) | `scrape(url)` -> Markdown | Deterministic parser |
 | Product detail (`/products/...`) | `scrape_json(url, schema=...)` -> dict | Firecrawl structured extraction |
-| Recommendations (nested in product page) | Same as product detail | Same as product detail |
 ⚙
 
 **Forbidden:**
@@ -1284,7 +1218,7 @@ The graph is a LangGraph `StateGraph` compiled once per process.
      +----------+----------+-----------------+
      |          |          |                 |
      v          v          v                 v
-  search   get_product  get_recommendations  respond
+   search   get_product  respond
      |          |          |                 |
      +----------+----------+-----------------+
                 |
@@ -1312,7 +1246,6 @@ any error, and a truncated JSON dump of the tool result.
 |---|---|---|
 | −`search_products_tool(...)` | `SearchService.search` | `SearchResult` as JSON dict |
 | −`get_product_tool(product_id)` | `ProductService.get_product` | `ProductDetails` as JSON dict |
-| −`get_recommendations_tool(product_id)` | `ProductService.get_recommendations` | `{"product_id": ..., "recommendations": [...]}` |
 ⚙
 
 Tools call **services**, never scrapers and never Firecrawl directly.
@@ -1323,7 +1256,6 @@ Tools call **services**, never scrapers and never Firecrawl directly.
 class IntentType(StrEnum):
     SEARCH = "search"
     GET_PRODUCT = "get_product"
-    GET_RECOMMENDATIONS = "get_recommendations"
     SMALL_TALK = "small_talk"
 
 class ParsedIntent(BaseModel):
@@ -1348,7 +1280,6 @@ service-layer interface. It is the only place that:
 - builds the initial `AgentState` from a user message,
 - resolves the conversation id,
 - extracts the final reply from the graph state,
-- curates `recommended_products`,
 - shapes the response envelope (`ChatResponse`),
 - exposes a streaming variant.
 
@@ -1386,7 +1317,7 @@ Event types:
 
 - `{"type": "token", "text": "..."}` -- one per LLM token as it is
 generated.
-- `{"type": "done", "conversation_id": ..., "intent": ..., "recommended_products": [...], "error": ...}` -- once, after the stream completes.
+- `{"type": "done", "conversation_id": ..., "intent": ..., "error": ...}` -- once, after the stream completes.
 
 Terminal sentinel:
 
@@ -1419,23 +1350,6 @@ survive a restart.
 messages (8 turns) via `trim_messages(strategy="last", start_on="human")`.
 - Both `parse_intent` and `respond` see the trimmed history, so follow-up
 turns resolve correctly.
-
-## 42.3 recommended_products
-
-Every chat response includes a structured `recommended_products` list.
-The list is populated by `ChatService._curate_recommended_products`:
-
-| Intent ↕▾ | Content ↕▾ | Limit ↕▾ |
-|---|---|---|
-| −`search` | first N products from the search result | 5 |
-| −`get_product` | the single product as a one-item list | 1 |
-| −`get_recommendations` | first N recommendations from the tool result | 5 |
-| −`small_talk` | empty list | -- |
-| −tool error | empty list | -- |
-⚙
-
-This mirrors the window the LLM's prompt instructs it to prefer, avoiding
-a second LLM call to extract which products were mentioned.
 
 ## 42.4 Local scrape store
 
@@ -1471,4 +1385,3 @@ and is bounded by TTL.
 ---
 
 End of Specification.
-

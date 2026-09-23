@@ -2,7 +2,7 @@
 """Diagnose what Firecrawl actually returns for a Daraz product page.
 
 The structured-extraction path (ADR-001) can silently return empty
-``specifications``, ``reviews``, and ``recommendations`` when the sections
+``specifications`` and ``reviews`` when the sections
 simply are not present in Firecrawl's snapshot of the page. Rewriting the
 extraction prompt cannot fix a missing-snapshot problem -- only the
 diagnostic can tell you which of the two is happening.

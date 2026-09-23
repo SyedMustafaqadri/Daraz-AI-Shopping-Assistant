@@ -209,7 +209,6 @@ def test_details_defaults() -> None:
     assert details.availability is None
     assert details.variants == []
     assert details.reviews == []
-    assert details.recommendations == []
 
 
 def test_details_with_nested_objects() -> None:
@@ -228,13 +227,6 @@ def test_details_with_nested_objects() -> None:
             "availability": "In Stock",
             "variants": [{"name": "Black", "price": 579.0, "available": True}],
             "reviews": [{"rating": 5.0, "comment": "Great!", "author": "Ali"}],
-            "recommendations": [
-                {
-                    "id": "i999",
-                    "title": "Another Mouse",
-                    "url": "https://www.daraz.pk/products/i999.html",
-                }
-            ],
         }
     )
     assert details.specifications["Brand"] == "Logitech"
@@ -242,8 +234,6 @@ def test_details_with_nested_objects() -> None:
     assert details.shipping.free_shipping is True
     assert len(details.variants) == 1
     assert len(details.reviews) == 1
-    assert len(details.recommendations) == 1
-    assert details.recommendations[0].id == "i999"
 
 
 def test_details_rejects_extra_fields() -> None:

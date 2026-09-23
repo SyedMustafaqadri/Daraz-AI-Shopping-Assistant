@@ -168,66 +168,6 @@
       padding: 0 0.5rem;
     }
 
-    /* Products Grid */
-    #products {
-      display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-      gap: 1.25rem;
-      margin-top: 1.5rem;
-    }
-
-    .card {
-      background: var(--card-bg);
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      padding: 1rem;
-      font-size: 0.9rem;
-      box-shadow: var(--shadow);
-      transition: all 0.3s ease;
-      display: flex;
-      flex-direction: column;
-    }
-
-    .card:hover {
-      transform: translateY(-4px);
-      box-shadow: var(--shadow-lg);
-      border-color: var(--primary);
-    }
-
-    .card img {
-      width: 100%;
-      height: 160px;
-      object-fit: contain;
-      border-radius: 8px;
-      background: #f1f5f9;
-      margin-bottom: 0.75rem;
-      padding: 0.75rem;
-    }
-
-    .card a {
-      color: var(--text);
-      text-decoration: none;
-      font-weight: 500;
-      line-height: 1.4;
-      margin-bottom: 0.75rem;
-      flex-grow: 1;
-      display: -webkit-box;
-      -webkit-line-clamp: 2;
-      -webkit-box-orient: vertical;
-      overflow: hidden;
-    }
-
-    .card a:hover {
-      color: var(--primary);
-    }
-
-    .card .price {
-      font-weight: 700;
-      font-size: 1.15rem;
-      color: var(--primary);
-      margin-top: auto;
-    }
-
     /* Log Output */
     #log {
       margin-top: 2.5rem;
@@ -280,7 +220,6 @@
 
   <div id="transcript">(transcript appear here)</div>
   <div id="reply"></div>
-  <div id="products"></div>
   <div id="log"></div>
 
   <script>
@@ -335,24 +274,6 @@ registerProcessor('pcm16-sender', PCM16Sender);
       const el = document.getElementById('log');
       el.textContent += msg + '\n';
       el.scrollTop = el.scrollHeight;
-    }
-
-    function renderProducts(products) {
-      const el = document.getElementById('products');
-      el.innerHTML = '';
-      for (const p of products || []) {
-        const card = document.createElement('div');
-        card.className = 'card';
-        const title = p.title || '';
-        const url = p.url || '#';
-        const price = p.price != null ? `Rs. ${p.price.toLocaleString()}` : '';
-        card.innerHTML = `
-      ${p.image ? `<img src="${p.image}" alt="">` : ''}
-      <a href="${url}" target="_blank" rel="noopener">${title.slice(0, 80)}</a>
-      <div class="price">${price}</div>
-    `;
-        el.appendChild(card);
-      }
     }
 
     // ----------------------------------------------------------------------
@@ -440,7 +361,6 @@ registerProcessor('pcm16-sender', PCM16Sender);
       } else if (msg.type === 'intent') {
         document.getElementById('reply').textContent = '';
       } else if (msg.type === 'done') {
-        renderProducts(msg.recommended_products || []);
       } else if (msg.type === 'stop_playback') {
         stopPlayback();
       } else if (msg.type === 'error') {

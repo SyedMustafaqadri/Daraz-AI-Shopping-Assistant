@@ -26,7 +26,6 @@ tests/
 |   |-- test_firecrawl_adapter.py
 |   |-- test_firecrawl_daraz_scraper.py
 |   |-- test_models_product.py
-|   |-- test_models_recommendation.py
 |   |-- test_models_search.py
 |   |-- test_product_service.py
 |   |-- test_scrape_store.py
@@ -57,9 +56,9 @@ tests/
 | Unit (scraper)                       | `FirecrawlDarazScraper` delegates to the adapter with correct args                  | Inject a mock `FirecrawlAdapter`                                     |
 | Unit (storage)                       | `ScrapeStore` load/set/get/prune, atomic writes, corrupt-file tolerance             | `tmp_path` per test; no shared state                                 |
 | Service (`SearchService`)            | Fetch -> parse -> validate -> envelope; store hit/miss on both paths                | Inject a mock `DarazScraper` and a temp `ScrapeStore`                |
-| Service (`ProductService`)           | Fetch -> validate -> normalise; store hit/miss; recommendations                     | Same                                                                 |
+| Service (`ProductService`)           | Fetch -> validate -> normalise; store hit/miss                                       | Same                                                                 |
 | Agent (state, tools, graph)          | Intent schema, tool wrappers, graph routing, error handling                         | Mock the LLM (`FakeLLM`), patch tool functions on the graph module   |
-| Service (`ChatService`)              | State construction, reply extraction, `recommended_products` curation, error paths  | Inject a mock compiled graph via the constructor                     |
+| Service (`ChatService`)              | State construction, reply extraction, error paths                                   | Inject a mock compiled graph via the constructor                     |
 | API (all routes)                     | Serialisation, param forwarding, error mapping, SSE framing, no-leak guarantees     | `fastapi.testclient.TestClient` + `app.dependency_overrides`         |
 
 **Key principles:**
@@ -148,8 +147,6 @@ and logs `PRODUCT_VALIDATION_FAILED`.
 - Invalid IDs (`""`, `"abc"`, `"1959941878"` missing the `i`) raise
 `InvalidRequestError` before the scraper is called.
 - A typed scraper error propagates unchanged (not wrapped).
-- `get_recommendations` reads the nested `recommendations` list and never
-triggers a second scraper call.
 - `_normalise_product_id` repairs a stripped `i` prefix and logs
 `PRODUCT_ID_MISSING_PREFIX`.
 - With a store: a second request for the same id returns without a second
@@ -207,8 +204,6 @@ Each `tests/api/test_*.py` module uses its own fixture that yields a
 | Scenario ↕▾ | Expected ↕▾ |
 |---|---|
 | −Valid product id | `200`, serialised `ProductDetails` |
-| −Recommendations list (non-empty) | `200`, list of `Recommendation` |
-| −Recommendations list (empty) | `200`, `[]` |
 | −Path id not matching `^i\d+$` | `422` |
 | −`/products/search` resolves to search endpoint | Search service called, product service NOT called |
 | −`InvalidRequestError` raised | `400` |
@@ -225,8 +220,7 @@ Each `tests/api/test_*.py` module uses its own fixture that yields a
 | Scenario ↕▾ | Expected ↕▾ |
 |---|---|
 | −Happy path with a reply and data | `200`, `reply` / `intent` / `data` present |
-| −`recommended_products` echoed | `200`, list matches the ChatResponse's value |
-| −Small talk (no data) | `200`, `intent == "small_talk"`, `data is None`, `recommended_products == []` |
+| −Small talk (no data) | `200`, `intent == "small_talk"`, `data is None` |
 | −Empty message body | `422` |
 | −Missing message field | `422` |
 | −Message over 2000 chars | `422` |
@@ -241,7 +235,6 @@ Each `tests/api/test_*.py` module uses its own fixture that yields a
 | Scenario ↕▾ | Expected ↕▾ |
 |---|---|
 | −Stream emits tokens + done | `text/event-stream`; token frames + `done` frame + `[DONE]` |
-| −Done frame carries recommended_products | `done.recommended_products` is a list |
 | −Empty stream | Body ends with `data: [DONE]` |
 | −Missing conversation_id accepted | `200` |
 | −Empty message body | `422` |
@@ -328,17 +321,12 @@ and real state shape -- with zero LLM or network traffic.
 `ChatService` is tested with a `MagicMock` graph whose `ainvoke` is an
 `AsyncMock` returning a pre-built final state. This verifies the service
 layer only: state construction, reply extraction from the last `AIMessage`,
-intent passthrough, `recommended_products` curation, and error propagation.
+intent passthrough, and error propagation.
 
 Representative assertions:
 
 - The reply is taken from the last `AIMessage` in the state.
 - A populated `tool_result` is returned as `ChatResponse.data`.
-- A `search` intent produces the top five products in
-`recommended_products`.
-- A `get_product` intent produces a one-item list.
-- A `get_recommendations` intent produces the top five recommendations.
-- A `small_talk` intent produces an empty list.
 - An error in the final state is surfaced on `ChatResponse.error`.
 - A state with no `AIMessage` yields the fallback reply string.
 
@@ -420,4 +408,3 @@ drops.
 
 When adapting to a Daraz layout change (see PARSING.md section
 6), refresh or add a fixture here and update the matching parser test.
-
